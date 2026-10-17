@@ -20,4 +20,4 @@ SKEWNONO에서 SPA 서빙, `LASTUSER` 인증, `.env`·office Redis 로딩, 장�
 - [x] uWSGI 설정: `processes=1`, `threads=4`, `enable-threads`, `lazy-apps`, `touch-reload`·`max-requests` 없음
 - [x] pytest가 앱 팩토리로 401/403/허용 경로와 장비 목록 거르기를 행동으로 시험함
 
-**Notes:** `GET /api/me`는 허용 목록 밖 사용자에게도 200(`allowed: false`)으로 답하고, 다른 `/api/*`는 403입니다. SPA가 막힌 이유를 보이려면 신원을 알아야 하기 때문입니다. eqp_id 일부 거르기는 화면에서 하고(장비 수십 대), pytest는 서버 쪽 Hitachi 거르기를 시험합니다. 운영 명부 key는 스펙의 `sem_list`를 따라 `v3_df_sem_list`입니다(방화벽 해제 전 장비도 들어 있음, 닿지 않는 장비는 이후 탐색에서 502로 드러남).
+**Notes:** `GET /api/me`는 허용 목록 밖 사용자에게도 200(`allowed: false`)으로 답하고, 다른 `/api/*`는 403입니다. SPA가 막힌 이유를 보이려면 신원을 알아야 하기 때문입니다. eqp_id 일부 거르기는 화면에서 하고(장비 수십 대), pytest는 서버 쪽 Hitachi 거르기를 시험합니다. 운영 명부 key는 `v3_df_sem_avail`입니다(접속 확인된 부분집합). 방화벽 해제 전 장비는 이 앱에서 쓸 일이 없어 뺐고, 새로 개통한 장비가 avail 갱신 전까지 안 보이는 한계는 받아들입니다. 전체 명부로 자동 폴백하지 않으며, avail에 있어도 닿지 않으면 502로 드러납니다(2026-10-18 Codex와 결정).

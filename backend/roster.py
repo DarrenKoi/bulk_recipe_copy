@@ -1,12 +1,12 @@
 """장비 명부. 공급자는 `() -> list[Tool]`이고 앱 팩토리에 주입합니다.
 
-운영은 office Redis `v3_df_sem_list`(읽기 전용), 집·테스트는 고정 목록입니다.
+운영은 office Redis `v3_df_sem_avail`(접속 확인된 장비, 읽기 전용), 집·테스트는 고정 목록입니다.
 계약은 docs/datatables/hitachi/sem_list.txt 입니다.
 """
 
 from dataclasses import dataclass
 
-ROSTER_KEY = "v3_df_sem_list"
+ROSTER_KEY = "v3_df_sem_avail"
 VENDORS = {"HITACHI", "AMAT"}
 
 
