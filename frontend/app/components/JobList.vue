@@ -11,6 +11,7 @@ type Job = {
   target_count: number
   recipe_count: number
   file_counts: Counts
+  queue_position?: number | null
 }
 type Detail = Job & { targets: { eqp: string }[], recipes: { idw: string, idp: string }[] }
 
@@ -38,7 +39,9 @@ onMounted(() => {
 })
 onUnmounted(() => clearInterval(timer))
 
-const collectionText = (j: Job) => COLLECTION[j.collection.state] + (j.collection.reason ? ` (${j.collection.reason})` : '')
+const collectionText = (j: Job) => j.queue_position
+  ? `대기 ${j.queue_position}번째`
+  : COLLECTION[j.collection.state] + (j.collection.reason ? ` (${j.collection.reason})` : '')
 </script>
 
 <template>

@@ -11,7 +11,7 @@ from flask import Flask, g, request
 
 from ftp_handler.core.client import TransferTooLarge
 
-from . import layout, store
+from . import layout, scheduler, store
 from .browse import walk_files
 from .roster import hitachi_tools
 from .transfer import transfer_job
@@ -133,21 +133,73 @@ def collect(app: Flask, job: dict) -> None:
         _block(db, job["id"], reason)
 
 
+class Scheduler:
+    """시작 판정과 슬롯 예약을 하는 한 곳. 메모리 상태는 이 프로세스에서 시작한 job 뿐입니다.
+
+    대기 job 은 판정 때마다 SQLite 에서 id 순으로 다시 읽습니다. 재기동 전에 시작한 job
+    (`collecting`·전송 중으로 남은 것)은 여기 없어 장비도 슬롯도 쥐지 않습니다.
+    ponytail: 이어 돌리는 것과 그 job 의 상한 재검사(`pending` -> `failed`)는 티켓 12(재기동 대조 복구).
+    """
+
+    def __init__(self, app: Flask) -> None:
+        self.app = app
+        self.lock = threading.Lock()
+        self.running: dict[int, scheduler.Entry] = {}
+
+    def admit(self) -> list[dict]:
+        """시작할 수 있는 job 을 모두 수집 중으로 잡고 슬롯을 예약해 돌려줍니다."""
+        db, cap = self.app.config["DB_PATH"], self.app.config["MAX_THREADS"]
+        with self.lock:
+            waiting = {
+                j["id"]: scheduler.Entry(j["id"], frozenset([j["source_eqp"], *j["targets"]]), len(j["targets"]), False)
+                for j in store.waiting_jobs(db)
+            }
+            queue = sorted([*self.running.values(), *waiting.values()])
+            start, over = scheduler.admit(queue, cap)
+            for job_id in over:
+                store.block_collection(db, job_id, "waiting", f"상한 초과: 대상 {waiting[job_id].n}대 > 스레드 상한 {cap}")
+            claimed = []
+            for job_id in start:
+                claimed.append(store.claim_job(db, job_id))
+                self.running[job_id] = waiting[job_id]._replace(started=True)
+            return claimed
+
+    def run(self, job: dict, *, parallel: bool) -> None:
+        """수집(슬롯 하나) 뒤 대상 작업자들. 마지막 작업자가 끝나면 예약을 풉니다."""
+        try:
+            collect(self.app, job)
+            transfer_job(self.app, job["id"], parallel=parallel)
+        finally:
+            with self.lock:
+                del self.running[job["id"]]
+            if wake := self.app.config.get("SCHEDULER_WAKE"):
+                wake.set()
+
+
 def run_until_idle(app: Flask, *, parallel: bool = False) -> None:
-    """대기 job 을 id 순으로 하나씩 수집하고 전송합니다. 스케줄러 스레드(`parallel`)와 테스트(순차)가 같이 씁니다."""
-    while (job := store.claim_next_waiting(app.config["DB_PATH"])) is not None:
-        collect(app, job)
-        transfer_job(app, job["id"], parallel=parallel)
+    """테스트용: 시작할 수 있는 job 을 판정하고 하나씩 끝까지 돌리기를 더 시작할 job 이 없을 때까지."""
+    sched = app.config["SCHEDULER"]
+    while claimed := sched.admit():
+        for job in claimed:
+            sched.run(job, parallel=parallel)
 
 
 def start_scheduler(app: Flask) -> None:
-    # ponytail: 한 번에 job 하나. 장비 겹침·스레드 예산 판정은 티켓 10.
-    wake = app.config["SCHEDULER_WAKE"] = threading.Event()
+    """스케줄러 스레드. 시작한 job 은 저마다 스레드에서 수집하고 대상마다 작업자를 띄웁니다."""
+    sched, wake = app.config["SCHEDULER"], threading.Event()
+    app.config["SCHEDULER_WAKE"] = wake
+
+    def run(job):
+        try:
+            sched.run(job, parallel=True)
+        except Exception:
+            app.logger.exception("job %s failed", job["id"])
 
     def loop():
         while True:
             try:
-                run_until_idle(app, parallel=True)
+                for job in sched.admit():
+                    threading.Thread(target=run, args=(job,), name=f"brc-job-{job['id']}", daemon=True).start()
             except Exception:
                 app.logger.exception("scheduler pass failed")
             wake.wait(5)
@@ -220,6 +272,8 @@ def _parse(body, app: Flask) -> dict:
 def register_jobs(app: Flask) -> None:
     from . import error_json
 
+    app.config["SCHEDULER"] = Scheduler(app)
+
     @app.post("/api/jobs")
     def create_job():
         try:
@@ -233,7 +287,12 @@ def register_jobs(app: Flask) -> None:
 
     @app.get("/api/jobs")
     def list_jobs():
-        return {"jobs": store.list_jobs(app.config["DB_PATH"])}
+        jobs = store.list_jobs(app.config["DB_PATH"])
+        # "대기 n번째" = 앞선 미시작 job 수 + 1. 미시작은 수집 대기뿐입니다.
+        waiting = sorted(j["id"] for j in jobs if j["collection"]["state"] == "waiting")
+        for j in jobs:
+            j["queue_position"] = waiting.index(j["id"]) + 1 if j["id"] in waiting else None
+        return {"jobs": jobs}
 
     @app.get("/api/jobs/<int:job_id>")
     def get_job(job_id):

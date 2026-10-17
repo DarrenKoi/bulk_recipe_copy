@@ -130,20 +130,28 @@ def _move(conn, job_id: int, frm: str, to: str, **fields) -> None:
         raise RuntimeError(f"job {job_id} 은(는) 이미 {frm} 이 아닙니다")
 
 
-def claim_next_waiting(db_path):
-    """가장 앞선 대기 job 을 수집 중으로 바꾸고 돌려줍니다. 없으면 None.
+def waiting_jobs(db_path) -> list[dict]:
+    """아직 시작하지 않은 job 을 id 순으로: id, 원본, 대상 목록."""
+    with connect(db_path) as conn:
+        rows = conn.execute("SELECT id, source_eqp FROM jobs WHERE collection = 'waiting' ORDER BY id").fetchall()
+        return [{"id": r["id"], "source_eqp": r["source_eqp"], "targets": [t[0] for t in conn.execute(
+            "SELECT eqp FROM job_targets WHERE job_id = ? ORDER BY eqp", (r["id"],))]} for r in rows]
 
-    `collecting` 으로 남은 job(재기동 전 수집 중이던 것)은 고르지 않습니다. 다시 수집할지는
-    티켓 12(재기동 대조 복구)가 정합니다.
-    """
+
+def claim_job(db_path, job_id: int) -> dict:
+    """대기 job 을 수집 중으로 바꾸고 수집 재료를 돌려줍니다. 시작 판정은 스케줄러가 합니다."""
     with connect(db_path) as conn, _tx(conn):
-        row = conn.execute("SELECT * FROM jobs WHERE collection = 'waiting' ORDER BY id LIMIT 1").fetchone()
-        if row is None:
-            return None
-        _move(conn, row["id"], "waiting", "collecting")
+        _move(conn, job_id, "waiting", "collecting")
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         pairs = [tuple(r) for r in conn.execute(
-            "SELECT eqp, idw, idp FROM job_pairs WHERE job_id = ? ORDER BY eqp, idw, idp", (row["id"],))]
+            "SELECT eqp, idw, idp FROM job_pairs WHERE job_id = ? ORDER BY eqp, idw, idp", (job_id,))]
     return dict(row) | {"pairs": pairs}
+
+
+def claim_next_waiting(db_path):
+    """가장 앞선 대기 job 을 시작 판정 없이 잡습니다. 수집만 따로 돌리는 테스트용."""
+    waiting = waiting_jobs(db_path)
+    return claim_job(db_path, waiting[0]["id"]) if waiting else None
 
 
 def finish_collection(db_path, job_id, *, manifest, manifest_hash, snapshot_dir, pairs, recipe_paths) -> None:
