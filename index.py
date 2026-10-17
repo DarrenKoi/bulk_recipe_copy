@@ -44,6 +44,9 @@ application = create_app(
     browse_max_entries=int(os.environ.get("BRC_BROWSE_MAX_ENTRIES", 5000)),
     max_threads=int(os.environ.get("BRC_MAX_THREADS", 32)),
     snapshot_cap_bytes=int(float(os.environ.get("BRC_SNAPSHOT_CAP_GB", 20)) * 1024**3),
+    transfer_seconds=float(os.environ.get("BRC_TRANSFER_SECONDS", 60)),
+    transfer_max_bytes=int(float(os.environ.get("BRC_TRANSFER_MAX_MB", 64)) * 1024**2),
+    transfer_retries=int(os.environ.get("BRC_TRANSFER_RETRIES", 3)),
 )
 
 if __name__ == "__main__":

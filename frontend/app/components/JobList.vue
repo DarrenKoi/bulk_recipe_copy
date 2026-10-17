@@ -25,7 +25,7 @@ const { data: detail, error: detailError, refresh: refreshDetail } = await useAs
   { watch: [opened] }
 )
 
-// 끝난 job 은 갱신하지 않습니다. 지금은 수집이 차단된 job 만 끝난 것입니다(전송은 티켓 05).
+// 끝난 job 은 갱신하지 않습니다. 수집이 차단됐거나 모든 file 이 종료한 job 입니다.
 const finished = (j: Job) => j.collection.state === 'blocked'
   || (j.collection.state === 'done' && j.file_counts.pending + j.file_counts.in_progress === 0)
 

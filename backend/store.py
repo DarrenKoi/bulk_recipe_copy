@@ -70,6 +70,8 @@ FILE_STATES = ("pending", "in_progress", "verified", "failed", "uncertain")
 
 # 수집 결과의 전이는 이 표 하나로만 일어납니다. done·blocked 는 종료입니다.
 _COLLECTION_NEXT = {"waiting": {"collecting", "blocked"}, "collecting": {"done", "blocked"}}
+# file 상태 전이도 표 하나로만. verified·failed·uncertain 은 종료입니다.
+_FILE_NEXT = {"pending": {"in_progress", "failed"}, "in_progress": {"verified", "failed", "uncertain"}}
 
 
 @contextmanager
@@ -166,6 +168,58 @@ def block_collection(db_path, job_id, frm: str, reason: str) -> None:
         _move(conn, job_id, frm, "blocked", collection_reason=reason)
 
 
+def transfer_plan(db_path, job_id: int) -> dict | None:
+    """수집이 끝난 job 의 전송 재료. 수집이 `done` 이 아니면 None."""
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None or row["collection"] != "done":
+            return None
+        pending: dict[str, list[str]] = {}
+        for r in conn.execute(
+            "SELECT target_eqp, path FROM files WHERE job_id = ? AND state = 'pending' ORDER BY target_eqp, path",
+            (job_id,),
+        ):
+            pending.setdefault(r["target_eqp"], []).append(r["path"])
+        return {
+            "id": job_id,
+            "class_name": row["class_name"],
+            "snapshot_dir": row["snapshot_dir"],
+            "manifest": {r["path"]: r["sha256"] for r in conn.execute(
+                "SELECT path, sha256 FROM manifest WHERE job_id = ?", (job_id,))},
+            "pairs": [tuple(r) for r in conn.execute(
+                "SELECT eqp, idw, idp FROM job_pairs WHERE job_id = ? ORDER BY eqp, idw, idp", (job_id,))],
+            "overwrites": {tuple(r) for r in conn.execute(
+                "SELECT eqp, idw, idp FROM job_overwrites WHERE job_id = ?", (job_id,))},
+            "pending": pending,
+        }
+
+
+def move_file(db_path, job_id, eqp, path, frm: str, to: str, *, reason=None, temp_path=None) -> bool:
+    """file 하나를 `frm` -> `to` 로. 이미 `frm` 이 아니면(다른 작업자가 실패 처리 등) False."""
+    if to not in _FILE_NEXT.get(frm, ()):
+        raise ValueError(f"file 상태 전이 불가: {frm} -> {to}")
+    with connect(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE files SET state = ?, reason = ?, temp_path = ? "
+            "WHERE job_id = ? AND target_eqp = ? AND path = ? AND state = ?",
+            (to, reason, temp_path, job_id, eqp, path, frm),
+        )
+    return cur.rowcount == 1
+
+
+def fail_pending(db_path, job_id, reason: str, *, eqp=None, paths=None) -> None:
+    """남은 `pending` 을 `failed(reason)` 로. `eqp`·`paths` 로 범위를 좁힙니다."""
+    sql, args = "UPDATE files SET state = 'failed', reason = ? WHERE job_id = ? AND state = 'pending'", [reason, job_id]
+    if eqp is not None:
+        sql += " AND target_eqp = ?"
+        args.append(eqp)
+    with connect(db_path) as conn, _tx(conn):
+        if paths is None:
+            conn.execute(sql, args)
+        else:
+            conn.executemany(sql + " AND path = ?", [(*args, p) for p in paths])
+
+
 def _summary(conn, row) -> dict:
     job_id = row["id"]
     counts = Counter({s: 0 for s in FILE_STATES})
@@ -209,4 +263,8 @@ def get_job(db_path, job_id: int) -> dict | None:
                 "SELECT DISTINCT idw, idp FROM job_pairs WHERE job_id = ? ORDER BY idw, idp", (job_id,))],
             "pairs": [{"eqp": r["eqp"], "idw": r["idw"], "idp": r["idp"]} for r in conn.execute(
                 "SELECT eqp, idw, idp FROM job_pairs WHERE job_id = ? ORDER BY eqp, idw, idp", (job_id,))],
+            # 결과 트리(티켓 08) 전까지 실패·불명확 file 만 평평하게 보여 줍니다.
+            "problems": [dict(r) for r in conn.execute(
+                "SELECT target_eqp AS eqp, path, state, reason, temp_path FROM files "
+                "WHERE job_id = ? AND state IN ('failed', 'uncertain') ORDER BY target_eqp, path", (job_id,))],
         }

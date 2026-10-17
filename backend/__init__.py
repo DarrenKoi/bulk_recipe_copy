@@ -43,6 +43,9 @@ def create_app(
     browse_max_entries: int = 5000,
     max_threads: int = 32,
     snapshot_cap_bytes: int = 20 * 1024**3,
+    transfer_seconds: float = 60.0,
+    transfer_max_bytes: int = 64 * 1024**2,
+    transfer_retries: int = 3,
     scheduler: bool = True,
 ) -> Flask:
     """`dev_user` 는 쿠키가 없을 때 쓸 신원입니다. 집 개발 실행만 넣고 운영은 None.
@@ -64,6 +67,9 @@ def create_app(
         BROWSE_MAX_ENTRIES=browse_max_entries,
         MAX_THREADS=max_threads,
         SNAPSHOT_CAP_BYTES=snapshot_cap_bytes,
+        TRANSFER_SECONDS=transfer_seconds,
+        TRANSFER_MAX_BYTES=transfer_max_bytes,
+        TRANSFER_RETRIES=transfer_retries,
     )
     store.init(db_path)
 

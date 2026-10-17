@@ -78,7 +78,8 @@ def test_created_job_waits_then_collects_a_snapshot_for_every_target(app_client,
     assert job["collection"] == {"state": "done", "reason": None}
     # P1: idp + 2 raw, P2: idp + 1 raw. `.idw` 는 옵션이 꺼져 있어 빠집니다.
     assert job["manifest"]["file_count"] == 5
-    assert job["file_counts"] == {"pending": 10, "in_progress": 0, "verified": 0, "failed": 0, "uncertain": 0}
+    # 대상 × 레시피 파일만큼 file 행. 전송 결과는 test_transfer 가 봅니다.
+    assert sum(job["file_counts"].values()) == 10
     assert job["executor"] == "engineer1"
     assert job["targets"] == [
         {"eqp": "4CCD6701", "may_create_class": False},
@@ -248,7 +249,7 @@ def test_file_rows_follow_the_stored_pairs_not_targets_times_recipes(app_client,
     ]
     # 스냅샷은 두 레시피의 합집합(P1 3개 + P2 2개), file 행은 쌍마다 그 레시피의 파일만.
     assert job["manifest"]["file_count"] == 5
-    assert job["file_counts"]["pending"] == 3 + 2
+    assert sum(job["file_counts"].values()) == 3 + 2
 
 
 class EscapingTool(FakeTool):

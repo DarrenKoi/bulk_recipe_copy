@@ -14,6 +14,7 @@ from ftp_handler.core.client import TransferTooLarge
 from . import layout, store
 from .browse import walk_files
 from .roster import hitachi_tools
+from .transfer import transfer_job
 
 
 def manifest_hash(manifest: list[tuple[str, int, str]]) -> str:
@@ -132,10 +133,11 @@ def collect(app: Flask, job: dict) -> None:
         _block(db, job["id"], reason)
 
 
-def run_until_idle(app: Flask) -> None:
-    """대기 job 을 id 순으로 하나씩 처리합니다. 스케줄러 스레드와 테스트가 같이 씁니다."""
+def run_until_idle(app: Flask, *, parallel: bool = False) -> None:
+    """대기 job 을 id 순으로 하나씩 수집하고 전송합니다. 스케줄러 스레드(`parallel`)와 테스트(순차)가 같이 씁니다."""
     while (job := store.claim_next_waiting(app.config["DB_PATH"])) is not None:
         collect(app, job)
+        transfer_job(app, job["id"], parallel=parallel)
 
 
 def start_scheduler(app: Flask) -> None:
@@ -145,7 +147,7 @@ def start_scheduler(app: Flask) -> None:
     def loop():
         while True:
             try:
-                run_until_idle(app)
+                run_until_idle(app, parallel=True)
             except Exception:
                 app.logger.exception("scheduler pass failed")
             wake.wait(5)

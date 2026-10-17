@@ -8,7 +8,14 @@ from datetime import datetime, timedelta, timezone
 from ftplib import error_perm
 from pathlib import PurePosixPath
 
-from ftp_handler.core.client import FileInfo, ListingTooLarge, TransferTimeout, TransferTooLarge
+from ftp_handler.core.client import (
+    FileInfo,
+    ListingTooLarge,
+    TargetExists,
+    TransferTimeout,
+    TransferTooLarge,
+    TransferUncertain,
+)
 
 from . import layout
 
@@ -22,6 +29,12 @@ class FakeTool:
         self.reachable = True
         self.stalled = False  # True 면 LIST가 끝나지 않는 장비처럼 deadline 에 걸립니다.
         self.on_download = None  # 테스트용: download(path) 직전에 불립니다. 수집 중 원본 변경 흉내.
+        # 장애 주입. 연결마다 작업 `drop_after` 번을 마친 다음 작업에서 끊깁니다(`drops` 번까지).
+        self.drop_after = 0
+        self.drops = 0
+        self.lose_rename_reply: set[str] = set()  # rename 은 일어나고 응답만 사라지는 경로
+        self.corrupt_downloads: set[str] = set()  # 내려받을 때 내용이 바뀌어 오는 경로
+        self._ops = 0
 
     def add(self, path: str, data: bytes, mtime: datetime) -> None:
         self.files[path] = (data, mtime)
@@ -45,7 +58,14 @@ class FakeTool:
     def __enter__(self) -> "FakeTool":
         if not self.reachable:
             raise ConnectionRefusedError("[Errno 61] Connection refused")
+        self._ops = 0
         return self
+
+    def _op(self) -> None:
+        if self.drops and self._ops >= self.drop_after:
+            self.drops -= 1
+            raise ConnectionResetError("[Errno 54] Connection reset by peer")
+        self._ops += 1
 
     def __exit__(self, *exc: object) -> None:
         pass
@@ -59,6 +79,7 @@ class FakeTool:
         deadline: float | None = None,
         **_,
     ) -> list[FileInfo]:
+        self._op()
         if self.stalled:
             raise TransferTimeout(f"LIST {remote_dir} exceeded {deadline}s")
         remote_dir = remote_dir.rstrip("/") or "/"
@@ -81,13 +102,34 @@ class FakeTool:
     def download(self, remote_path: str, *, max_bytes: int | None = None, **_) -> bytes:
         if self.on_download:
             self.on_download(remote_path)
+        self._op()
         try:
             data = self.files[remote_path][0]
         except KeyError:
             raise error_perm(f"550 {remote_path}: No such file or directory") from None
+        if remote_path in self.corrupt_downloads:
+            data = bytes(b ^ 0xFF for b in data)
         if max_bytes is not None and len(data) > max_bytes:
             raise TransferTooLarge(f"{remote_path} exceeds {max_bytes} bytes")
         return data
+
+    def mkdir(self, remote_dir: str) -> None:
+        self._op()
+        for d in [remote_dir, *map(str, PurePosixPath(remote_dir).parents)]:
+            if d in self.files:
+                raise error_perm(f"550 {d}: File exists")
+        self.dirs.add(remote_dir)
+
+    def put(self, remote_path: str, data: bytes, *, overwrite: bool = False, **_) -> None:
+        """`FtpClient.put` 처럼 임시 이름 STOR 뒤 rename. 장비 하나·쓰는 쪽 하나라 원자적으로 흉내 냅니다."""
+        self._op()
+        if str(PurePosixPath(remote_path).parent) not in self._all_dirs():
+            raise error_perm(f"553 {remote_path}: No such directory")
+        if not overwrite and remote_path in self.files:
+            raise TargetExists(remote_path)
+        self.files[remote_path] = (bytes(data), datetime.now(KST))
+        if remote_path in self.lose_rename_reply:
+            raise TransferUncertain(f"rename -> {remote_path}: reply lost", temp_path=f"{remote_path}.0a1b2c.part")
 
     def list_idp_files(self, data_dir: str, **limits) -> list[FileInfo]:
         """`data/*/*.idp`를 한 번에. 실제 장비의 명령은 티켓 13에서 정합니다."""
