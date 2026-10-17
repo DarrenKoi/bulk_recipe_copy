@@ -323,3 +323,15 @@ def test_local_write_errors_do_not_leak_local_paths(app_client, tmp_path):
     assert job["collection"]["state"] == "blocked"
     assert job["collection"]["reason"].startswith("수집 오류: 로컬 저장 실패(")
     assert str(tmp_path) not in job["collection"]["reason"]
+
+
+def test_a_symlink_loop_in_the_snapshot_folder_does_not_leak_local_paths(app_client, tmp_path):
+    app, c = app_client
+    job_id = c.post("/api/jobs", json=body()).json["id"]
+    snap = tmp_path / "snapshots" / str(job_id)
+    snap.symlink_to(snap)
+    run_until_idle(app)
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert job["collection"]["state"] == "blocked"
+    assert job["collection"]["reason"].startswith("수집 오류: 로컬 저장 실패(")
+    assert str(tmp_path) not in job["collection"]["reason"]

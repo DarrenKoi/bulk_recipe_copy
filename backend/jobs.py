@@ -41,13 +41,13 @@ class _Blocked(Exception):
 
 
 def _save(app: Flask, snap: Path, path: str, data: bytes) -> None:
-    local = (snap / path.lstrip("/")).resolve()
-    if not local.is_relative_to(snap.resolve()):
-        raise _Blocked(f"수집 오류: 스냅샷 폴더 밖의 경로입니다: {path!r}")
     try:
+        local = (snap / path.lstrip("/")).resolve()
+        if not local.is_relative_to(snap.resolve()):
+            raise _Blocked(f"수집 오류: 스냅샷 폴더 밖의 경로입니다: {path!r}")
         local.parent.mkdir(parents=True, exist_ok=True)
         local.write_bytes(data)
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:  # RuntimeError: resolve()의 심볼릭 링크 루프
         # 예외 원문에는 로컬 경로가 들어 있어 서버 로그에만 남깁니다(스펙 "권한").
         app.logger.exception("snapshot write failed: %s", path)
         raise _Blocked(f"수집 오류: 로컬 저장 실패({type(exc).__name__})") from exc
