@@ -397,7 +397,14 @@ class FtpClient:
         """Store ``data`` at ``remote_path`` (STOR), overwriting if it exists."""
         self._ftp.storbinary(f"STOR {remote_path}", BytesIO(data))
 
-    def put(self, remote_path: str, data: bytes, *, deadline: float | None = None) -> None:
+    def put(
+        self,
+        remote_path: str,
+        data: bytes,
+        *,
+        deadline: float | None = None,
+        overwrite: bool = False,
+    ) -> None:
         """Write ``data`` to a new file at ``remote_path``, never overwriting.
 
         STORs to ``<remote_path>.<random>.part`` in the same folder, then
@@ -420,8 +427,15 @@ class FtpClient:
         exception propagates with a ``temp_path`` attribute naming the
         leftover. A connection error during the rename raises
         ``TransferUncertain``: the server may already have renamed.
+
+        ``overwrite=True`` replaces an existing target instead: the temp file
+        is STORed as above, then the target is DELEd (if present) and the temp
+        renamed onto it. DELE comes first because RNTO onto an existing file
+        is refused by some servers. The target is briefly absent between DELE
+        and RNTO; a reply lost in that window also raises ``TransferUncertain``
+        with the complete data still at ``temp_path``.
         """
-        if self._exists(remote_path):
+        if not overwrite and self._exists(remote_path):
             raise TargetExists(remote_path)
         temp = f"{remote_path}.{secrets.token_hex(6)}.part"
         started = time.monotonic()
@@ -432,7 +446,7 @@ class FtpClient:
         try:
             self._ftp.storbinary(f"STOR {temp}", BytesIO(data), callback=sent)
             # Again: the STOR may have taken long enough for a writer to land.
-            if self._exists(remote_path):
+            if not overwrite and self._exists(remote_path):
                 raise TargetExists(remote_path)
         except Exception as exc:
             if isinstance(exc, TransferTimeout):
@@ -440,6 +454,8 @@ class FtpClient:
             self._drop_temp(temp, exc)
             raise
         try:
+            if overwrite and self._exists(remote_path):
+                self._ftp.delete(remote_path)
             self._ftp.rename(temp, remote_path)
         except (OSError, EOFError) as exc:
             # The command may have reached the server and run; only the reply
@@ -474,6 +490,33 @@ class FtpClient:
             if str(exc).startswith("550"):
                 return False
             raise
+        return True
+
+    def mkdir(self, remote_dir: str) -> None:
+        """Create ``remote_dir`` and any missing parents (MKD, one level each).
+
+        A level that already exists counts as success. MKD's refusal code for
+        "exists" varies by server (550, 521), so any ``error_perm`` is checked
+        by CWD into that level; if it is not an enterable directory, the
+        original refusal propagates.
+        """
+        parts = [p for p in remote_dir.split("/") if p]
+        prefix = "/" if remote_dir.startswith("/") else ""
+        for i in range(len(parts)):
+            level = prefix + "/".join(parts[: i + 1])
+            try:
+                self._ftp.mkd(level)
+            except error_perm:
+                if not self._is_dir(level):
+                    raise
+
+    def _is_dir(self, remote_path: str) -> bool:
+        cwd = self._ftp.pwd()
+        try:
+            self._ftp.cwd(remote_path)
+        except error_perm:
+            return False
+        self._ftp.cwd(cwd)
         return True
 
     def remove(self, remote_path: str) -> None:

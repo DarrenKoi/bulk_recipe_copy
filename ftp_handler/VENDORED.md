@@ -10,3 +10,7 @@
 
 `web_app/BackgroundJobs`와 `proxy/`는 이 앱에서 쓰지 않습니다(메모리 기반, 덮어쓰는
 STOR). 지우지 않고 두는 것은 upstream과의 diff를 읽기 쉽게 하기 위해서입니다.
+
+2026-10-18 비교 시점에 이 사본은 `flask_modules`(`4437371`)와 SKEWNONO(`96b50498`)의
+`ftp_handler/`와 바이트 단위로 같았습니다. 티켓 02에서 `put(overwrite=True)`와 `mkdir`을
+더했고, 두 원본에 반영하는 일은 후속 작업으로 남아 있습니다.
