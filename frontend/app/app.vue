@@ -50,10 +50,15 @@ const blocked = computed(() => {
         </p>
       </section>
 
-      <ToolPicker
-        v-else-if="me"
-        v-model="source"
-      />
+      <template v-else-if="me">
+        <ToolPicker v-model="source" />
+        <!-- key: 장비를 바꾸면 class·필터·열린 행을 모두 새로 시작합니다. -->
+        <RecipeBrowser
+          v-if="source"
+          :key="source"
+          :eqp="source"
+        />
+      </template>
     </main>
   </UApp>
 </template>

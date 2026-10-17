@@ -9,11 +9,15 @@ idp, 수정 시각)가 뜹니다. 이름으로 거르고 수정 시각으로 정
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `GET /api/tools/{eqp}/classes`, `.../classes/{class}/recipes`, `.../recipes/{idw}/{idp}`가 스펙대로 응답
-- [ ] 레시피 레이아웃 모듈 하나만 경로를 조립함(`data/{idw}/{idp}.idp`, `data/{idw}/{idp}/`, `data/{idw}.idw`)
-- [ ] 장비에 닿지 않으면 502와 사유. 빈 목록으로 숨기지 않음
-- [ ] 화면: class 선택 → 레시피 표(이름 거르기, 수정 시각 정렬) → 행을 열면 파일 수·총 크기
-- [ ] 집 개발 실행에서 샘플 레시피를 채운 가짜 장비 몇 대가 뜸
-- [ ] pytest가 가짜 장비로 세 API와 502를 시험함
+- [x] `GET /api/tools/{eqp}/classes`, `.../classes/{class}/recipes`, `.../recipes/{idw}/{idp}`가 스펙대로 응답
+- [x] 레시피 레이아웃 모듈 하나만 경로를 조립함(`data/{idw}/{idp}.idp`, `data/{idw}/{idp}/`, `data/{idw}.idw`)
+- [x] 장비에 닿지 않으면 502와 사유. 빈 목록으로 숨기지 않음
+- [x] 화면: class 선택 → 레시피 표(이름 거르기, 수정 시각 정렬) → 행을 열면 파일 수·총 크기
+- [x] 집 개발 실행에서 샘플 레시피를 채운 가짜 장비 몇 대가 뜸
+- [x] pytest가 가짜 장비로 세 API와 502를 시험함
+
+**Notes:** 실제 장비의 레시피 목록은 `backend/browse.py`의 `HitachiFtpClient.list_idp_files` 하나가
+맡고, 지금은 `NotImplementedError`를 냅니다(티켓 13). 그 전까지 운영 앱의 레시피 목록 API는 500입니다.
+idw 폴더마다 LIST(N+1)로 폴백하지 않았습니다. 그 선택은 사용자가 합니다.

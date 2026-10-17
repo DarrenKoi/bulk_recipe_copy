@@ -5,6 +5,7 @@ from pathlib import Path
 
 from flask import Flask, g, jsonify, request
 
+from .browse import register_browse
 from .roster import Tool, hitachi_tools
 from .spa import register_spa
 
@@ -81,5 +82,6 @@ def create_app(
             ]
         }
 
+    register_browse(app)
     register_spa(app, Path(spa_dir))
     return app

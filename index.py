@@ -1,6 +1,6 @@
 """uWSGI 진입점(`application`)과 집 개발 실행(`python index.py`).
 
-`BRC_DEV=1` 이면 가짜 명부와 개발용 신원(`local-dev`, 허용됨)으로 뜹니다.
+`BRC_DEV=1` 이면 가짜 명부·샘플 레시피를 채운 가짜 장비와 개발용 신원(`local-dev`, 허용됨)으로 뜹니다.
 """
 
 import os
@@ -9,8 +9,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from backend import create_app
+from backend.browse import HitachiFtpClient
+from backend.fake_fleet import dev_fleet
 from backend.roster import fake_roster, office_roster
-from ftp_handler.core.client import FtpClient
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
@@ -22,7 +23,7 @@ allowed = {u.strip() for u in os.environ.get("BRC_ALLOWED_USERS", "").split(",")
 
 
 def connect(tool):
-    return FtpClient(
+    return HitachiFtpClient(
         host=tool.eqp_ip,
         user=os.environ.get("BRC_FTP_USER", ""),
         password=os.environ.get("BRC_FTP_PASSWORD", ""),
@@ -30,9 +31,11 @@ def connect(tool):
     )
 
 
+FLEET = dev_fleet() if DEV else {}
+
 application = create_app(
     roster=fake_roster if DEV else office_roster,
-    connect=connect,
+    connect=(lambda tool: FLEET[tool.eqp_id]) if DEV else connect,
     db_path=VAR / "brc.sqlite3",
     snapshot_dir=VAR / "snapshots",
     allowed_users=allowed | {DEV_USER} if DEV else allowed,
