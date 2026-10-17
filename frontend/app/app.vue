@@ -3,6 +3,14 @@ type Me = { user: string, allowed: boolean }
 
 const { data: me, error } = await useFetch<Me>('/api/me')
 const source = ref<string | null>(null)
+const cls = ref<string | undefined>()
+const picked = ref<string[]>([])
+const openedJob = ref<number | null>(null)
+
+watch(source, () => {
+  cls.value = undefined
+  picked.value = []
+})
 
 // 401: LASTUSER 쿠키 없음, 그 외 오류: 서버에 닿지 않음, allowed=false: 허용 목록 밖.
 const blocked = computed(() => {
@@ -56,8 +64,18 @@ const blocked = computed(() => {
         <RecipeBrowser
           v-if="source"
           :key="source"
+          v-model:cls="cls"
+          v-model:picked="picked"
           :eqp="source"
         />
+        <JobLauncher
+          v-if="source && cls && picked.length"
+          :eqp="source"
+          :cls="cls"
+          :picked="picked"
+          @created="openedJob = $event"
+        />
+        <JobList v-model="openedJob" />
       </template>
     </main>
   </UApp>

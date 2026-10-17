@@ -4,7 +4,9 @@ type Summary = { file_count: number, total_bytes: number }
 
 const props = defineProps<{ eqp: string }>()
 
-const cls = ref<string | undefined>()
+const cls = defineModel<string | undefined>('cls')
+// 고른 레시피. 키는 rid(`idw/idp`)입니다.
+const picked = defineModel<string[]>('picked', { default: () => [] })
 const query = ref('')
 const newestFirst = ref(true)
 const opened = ref<string | null>(null)
@@ -34,6 +36,7 @@ const shown = computed(() => {
 watch(cls, () => {
   opened.value = null
   summaries.value = {}
+  picked.value = []
 })
 
 const rid = (r: Recipe) => `${r.idw}/${r.idp}`
@@ -130,6 +133,9 @@ function size(n: number) {
       >
         <thead>
           <tr class="sk-label border-b border-(--sk-border) text-left">
+            <th class="w-8 py-2">
+              <span class="sr-only">선택</span>
+            </th>
             <th class="py-2">
               idp
             </th>
@@ -156,6 +162,14 @@ function size(n: number) {
               :class="{ 'bg-(--sk-muted-surface)': opened === rid(r) }"
               @click="toggle(r)"
             >
+              <td @click.stop>
+                <input
+                  v-model="picked"
+                  type="checkbox"
+                  :value="rid(r)"
+                  :aria-label="`${rid(r)} 선택`"
+                >
+              </td>
               <td class="py-2 font-mono text-(--sk-ink)">
                 <button
                   type="button"
@@ -179,8 +193,8 @@ function size(n: number) {
               class="border-b border-(--sk-border-soft)"
             >
               <td
-                colspan="3"
-                class="sk-body py-2 pl-8"
+                colspan="4"
+                class="sk-body py-2 pl-16"
               >
                 <span :class="detail(r).tone">{{ detail(r).text }}</span>
               </td>

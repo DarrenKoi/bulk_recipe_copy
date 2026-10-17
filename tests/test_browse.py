@@ -37,6 +37,7 @@ def make_client(tmp_path, fleet):
             snapshot_dir=tmp_path / "snapshots",
             allowed_users={"engineer1"},
             spa_dir=tmp_path / "no-spa",
+            scheduler=False,
             **settings,
         )
         c = app.test_client()

@@ -19,6 +19,7 @@ def make_client(tmp_path, roster=lambda: ROSTER, spa_dir=None):
         snapshot_dir=tmp_path / "snapshots",
         allowed_users={"engineer1"},
         spa_dir=spa_dir or tmp_path / "no-spa",
+        scheduler=False,
     )
     return app.test_client()
 

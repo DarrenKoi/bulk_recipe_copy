@@ -47,17 +47,20 @@ class _Bounded:
         return self._spend(self._ftp.list_idp_files(data_dir, **self._limits()))
 
 
-def _raw_summary(ftp, remote_dir: str) -> tuple[int, int]:
-    count = total = 0
+def walk_files(ftp, remote_dir: str):
+    """`remote_dir` 아래 파일 전부(하위 폴더 포함). 링크는 따라가지 않고 건너뜁니다."""
     for e in ftp.list_details(remote_dir):
         if e.is_link:
             continue
         if e.is_dir:
-            c, t = _raw_summary(ftp, e.path)
-            count, total = count + c, total + t
+            yield from walk_files(ftp, e.path)
         else:
-            count, total = count + 1, total + (e.size or 0)
-    return count, total
+            yield e
+
+
+def _raw_summary(ftp, remote_dir: str) -> tuple[int, int]:
+    files = list(walk_files(ftp, remote_dir))
+    return len(files), sum(f.size or 0 for f in files)
 
 
 def register_browse(app: Flask) -> None:

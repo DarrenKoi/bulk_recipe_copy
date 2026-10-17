@@ -5,7 +5,9 @@ from pathlib import Path
 
 from flask import Flask, g, jsonify, request
 
+from . import store
 from .browse import register_browse
+from .jobs import register_jobs, start_scheduler
 from .roster import Tool, hitachi_tools
 from .spa import register_spa
 
@@ -39,8 +41,14 @@ def create_app(
     spa_dir: Path = DEFAULT_SPA_DIR,
     browse_seconds: float = 5.0,
     browse_max_entries: int = 5000,
+    max_threads: int = 32,
+    snapshot_cap_bytes: int = 20 * 1024**3,
+    scheduler: bool = True,
 ) -> Flask:
-    """`dev_user` 는 쿠키가 없을 때 쓸 신원입니다. 집 개발 실행만 넣고 운영은 None."""
+    """`dev_user` 는 쿠키가 없을 때 쓸 신원입니다. 집 개발 실행만 넣고 운영은 None.
+
+    `scheduler=False` 면 스케줄러 스레드를 띄우지 않습니다. 테스트는 `jobs.run_until_idle` 로 돌립니다.
+    """
     app = Flask(__name__)
     db_path = Path(db_path)
     snapshot_dir = Path(snapshot_dir)
@@ -54,7 +62,10 @@ def create_app(
         ALLOWED_USERS=frozenset(allowed_users),
         BROWSE_SECONDS=browse_seconds,
         BROWSE_MAX_ENTRIES=browse_max_entries,
+        MAX_THREADS=max_threads,
+        SNAPSHOT_CAP_BYTES=snapshot_cap_bytes,
     )
+    store.init(db_path)
 
     @app.before_request
     def _gate():
@@ -87,5 +98,8 @@ def create_app(
         }
 
     register_browse(app)
+    register_jobs(app)
+    if scheduler:
+        start_scheduler(app)
     register_spa(app, Path(spa_dir))
     return app
