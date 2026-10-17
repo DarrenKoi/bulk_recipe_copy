@@ -14,6 +14,11 @@ def _part(value: str) -> str:
     return value
 
 
+def child(remote_dir: str, name: str) -> str:
+    """`remote_dir` 의 직계 자식 경로. 장비가 준 목록 항목 이름도 이것으로 검사합니다."""
+    return f"{remote_dir.rstrip('/')}/{_part(name)}"
+
+
 def class_dir(class_name: str) -> str:
     return f"{ROOT}/{_part(class_name)}"
 

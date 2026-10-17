@@ -32,11 +32,13 @@ CREATE TABLE IF NOT EXISTS job_targets (
   may_create_class INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (job_id, eqp)
 );
-CREATE TABLE IF NOT EXISTS job_recipes (
+-- 사용자가 고른 (대상, 레시피) 쌍. 확인 단계에서 쌍을 뺄 수 있어 대상 × 레시피와 다를 수 있습니다.
+CREATE TABLE IF NOT EXISTS job_pairs (
   job_id INTEGER NOT NULL REFERENCES jobs(id),
+  eqp TEXT NOT NULL,
   idw TEXT NOT NULL,
   idp TEXT NOT NULL,
-  PRIMARY KEY (job_id, idw, idp)
+  PRIMARY KEY (job_id, eqp, idw, idp)
 );
 CREATE TABLE IF NOT EXISTS job_overwrites (
   job_id INTEGER NOT NULL REFERENCES jobs(id),
@@ -97,16 +99,20 @@ def init(db_path: Path) -> None:
         conn.executescript(_SCHEMA)
 
 
-def create_job(db_path, *, executor, source_eqp, class_name, recipes, targets) -> int:
+def create_job(db_path, *, executor, source_eqp, class_name, pairs) -> int:
+    """`pairs` 는 (대상 eqp, idw, idp) 목록입니다."""
     with connect(db_path) as conn, _tx(conn):
         job_id = conn.execute(
             "INSERT INTO jobs (executor, created_at, source_eqp, class_name) VALUES (?, ?, ?, ?)",
             (executor, datetime.now().astimezone().isoformat(timespec="seconds"), source_eqp, class_name),
         ).lastrowid
-        conn.executemany("INSERT INTO job_targets (job_id, eqp) VALUES (?, ?)", [(job_id, e) for e in targets])
         conn.executemany(
-            "INSERT INTO job_recipes (job_id, idw, idp) VALUES (?, ?, ?)",
-            [(job_id, idw, idp) for idw, idp in recipes],
+            "INSERT INTO job_targets (job_id, eqp) VALUES (?, ?)",
+            [(job_id, e) for e in dict.fromkeys(e for e, _, _ in pairs)],
+        )
+        conn.executemany(
+            "INSERT INTO job_pairs (job_id, eqp, idw, idp) VALUES (?, ?, ?, ?)",
+            [(job_id, *pair) for pair in pairs],
         )
     return job_id
 
@@ -133,15 +139,16 @@ def claim_next_waiting(db_path):
         if row is None:
             return None
         _move(conn, row["id"], "waiting", "collecting")
-        recipes = [(r["idw"], r["idp"]) for r in conn.execute(
-            "SELECT idw, idp FROM job_recipes WHERE job_id = ? ORDER BY idw, idp", (row["id"],))]
-        targets = [r["eqp"] for r in conn.execute(
-            "SELECT eqp FROM job_targets WHERE job_id = ? ORDER BY eqp", (row["id"],))]
-    return dict(row) | {"recipes": recipes, "targets": targets}
+        pairs = [tuple(r) for r in conn.execute(
+            "SELECT eqp, idw, idp FROM job_pairs WHERE job_id = ? ORDER BY eqp, idw, idp", (row["id"],))]
+    return dict(row) | {"pairs": pairs}
 
 
-def finish_collection(db_path, job_id, *, manifest, manifest_hash, snapshot_dir, targets) -> None:
-    """manifest·file 행(대상 × 파일, pending)·수집 완료를 한 트랜잭션으로 기록합니다."""
+def finish_collection(db_path, job_id, *, manifest, manifest_hash, snapshot_dir, pairs, recipe_paths) -> None:
+    """manifest·file 행(쌍마다 대상 × 그 레시피의 파일, pending)·수집 완료를 한 트랜잭션으로 기록합니다.
+
+    `recipe_paths` 는 (idw, idp) -> 그 레시피의 원격 경로 목록입니다.
+    """
     with connect(db_path) as conn, _tx(conn):
         conn.executemany(
             "INSERT INTO manifest (job_id, path, size, sha256) VALUES (?, ?, ?, ?)",
@@ -149,7 +156,7 @@ def finish_collection(db_path, job_id, *, manifest, manifest_hash, snapshot_dir,
         )
         conn.executemany(
             "INSERT INTO files (job_id, target_eqp, path) VALUES (?, ?, ?)",
-            [(job_id, eqp, p) for eqp in targets for p, _, _ in manifest],
+            [(job_id, eqp, p) for eqp, idw, idp in pairs for p in recipe_paths[(idw, idp)]],
         )
         _move(conn, job_id, "collecting", "done", manifest_hash=manifest_hash, snapshot_dir=str(snapshot_dir))
 
@@ -177,7 +184,8 @@ def _summary(conn, row) -> dict:
         "collection": {"state": row["collection"], "reason": row["collection_reason"]},
         "manifest": {"file_count": m["n"], "total_bytes": m["b"]},
         "target_count": conn.execute("SELECT count(*) FROM job_targets WHERE job_id = ?", (job_id,)).fetchone()[0],
-        "recipe_count": conn.execute("SELECT count(*) FROM job_recipes WHERE job_id = ?", (job_id,)).fetchone()[0],
+        "recipe_count": conn.execute(
+            "SELECT count(*) FROM (SELECT DISTINCT idw, idp FROM job_pairs WHERE job_id = ?)", (job_id,)).fetchone()[0],
         "file_counts": dict(counts),
         "cancel_requested": bool(row["cancel_requested"]),
         "closed": bool(row["closed"]),
@@ -198,5 +206,7 @@ def get_job(db_path, job_id: int) -> dict | None:
             "targets": [{"eqp": r["eqp"], "may_create_class": bool(r["may_create_class"])} for r in conn.execute(
                 "SELECT eqp, may_create_class FROM job_targets WHERE job_id = ? ORDER BY eqp", (job_id,))],
             "recipes": [{"idw": r["idw"], "idp": r["idp"]} for r in conn.execute(
-                "SELECT idw, idp FROM job_recipes WHERE job_id = ? ORDER BY idw, idp", (job_id,))],
+                "SELECT DISTINCT idw, idp FROM job_pairs WHERE job_id = ? ORDER BY idw, idp", (job_id,))],
+            "pairs": [{"eqp": r["eqp"], "idw": r["idw"], "idp": r["idp"]} for r in conn.execute(
+                "SELECT eqp, idw, idp FROM job_pairs WHERE job_id = ? ORDER BY eqp, idw, idp", (job_id,))],
         }

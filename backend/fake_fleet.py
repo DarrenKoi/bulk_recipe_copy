@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from ftplib import error_perm
 from pathlib import PurePosixPath
 
-from ftp_handler.core.client import FileInfo, ListingTooLarge, TransferTimeout
+from ftp_handler.core.client import FileInfo, ListingTooLarge, TransferTimeout, TransferTooLarge
 
 from . import layout
 
@@ -77,11 +77,14 @@ class FakeTool:
             raise ListingTooLarge(f"{remote_dir} has over {max_entries} LIST lines")
         return out
 
-    def download(self, remote_path: str, **_) -> bytes:
+    def download(self, remote_path: str, *, max_bytes: int | None = None, **_) -> bytes:
         try:
-            return self.files[remote_path][0]
+            data = self.files[remote_path][0]
         except KeyError:
             raise error_perm(f"550 {remote_path}: No such file or directory") from None
+        if max_bytes is not None and len(data) > max_bytes:
+            raise TransferTooLarge(f"{remote_path} exceeds {max_bytes} bytes")
+        return data
 
     def list_idp_files(self, data_dir: str, **limits) -> list[FileInfo]:
         """`data/*/*.idp`를 한 번에. 실제 장비의 명령은 티켓 13에서 정합니다."""

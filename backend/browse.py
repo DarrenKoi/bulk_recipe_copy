@@ -48,8 +48,13 @@ class _Bounded:
 
 
 def walk_files(ftp, remote_dir: str):
-    """`remote_dir` 아래 파일 전부(하위 폴더 포함). 링크는 따라가지 않고 건너뜁니다."""
+    """`remote_dir` 아래 파일 전부(하위 폴더 포함). 링크는 따라가지 않고 건너뜁니다.
+
+    목록은 장비가 준 데이터라 항목마다 요청한 폴더의 직계 자식인지 확인합니다(`../x` 같은 이름 거부).
+    """
     for e in ftp.list_details(remote_dir):
+        if e.path != layout.child(remote_dir, e.name):
+            raise ValueError(f"{remote_dir} 의 직계 자식이 아닌 목록 항목입니다: {e.path!r}")
         if e.is_link:
             continue
         if e.is_dir:
