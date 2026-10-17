@@ -186,6 +186,8 @@ def transfer_plan(db_path, job_id: int) -> dict | None:
             "snapshot_dir": row["snapshot_dir"],
             "manifest": {r["path"]: r["sha256"] for r in conn.execute(
                 "SELECT path, sha256 FROM manifest WHERE job_id = ?", (job_id,))},
+            "sizes": {r["path"]: r["size"] for r in conn.execute(
+                "SELECT path, size FROM manifest WHERE job_id = ?", (job_id,))},
             "pairs": [tuple(r) for r in conn.execute(
                 "SELECT eqp, idw, idp FROM job_pairs WHERE job_id = ? ORDER BY eqp, idw, idp", (job_id,))],
             "overwrites": {tuple(r) for r in conn.execute(

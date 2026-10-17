@@ -89,8 +89,7 @@ class _Worker:
                 i, failures = i + 1, 0
             except error_perm as exc:
                 if not entered:  # 로그인 거부(530 등). 다시 붙어도 같으니 남은 파일을 모두 실패로.
-                    store.fail_pending(self.db, self.job_id, f"로그인 거부: {exc}", eqp=self.eqp)
-                    return
+                    return self._give_up(f"로그인 거부: {exc}")
                 # 장비가 거부한 파일 하나. 다음 파일은 새 연결로.
                 self._end(queue[i][2], "failed", f"장비 거부: {exc}")
                 i, failures = i + 1, 0
@@ -98,12 +97,7 @@ class _Worker:
                 self.app.logger.warning("job %s %s: connection error", self.job_id, self.eqp, exc_info=True)
                 failures += 1
                 if failures > self.app.config["TRANSFER_RETRIES"]:
-                    if self.claimed == queue[i][2]:
-                        # put 까지 끝났으면 대상에 무엇이 있는지 모릅니다. 근거 없이 실패로 두지 않습니다.
-                        self._end(self.claimed, *(("uncertain", "검증 전 연결 실패") if self.put_done
-                                                  else ("failed", "연결 실패")))
-                    store.fail_pending(self.db, self.job_id, "연결 실패", eqp=self.eqp)
-                    return
+                    return self._give_up("연결 실패")
             except Exception as exc:
                 # 예상 못 한 오류. 잡은 파일은 쓰였는지 모르니 uncertain, 나머지는 실패로 끝내
                 # job 이 in_progress 에 걸려 끝나지 않는 일을 막습니다.
@@ -113,6 +107,13 @@ class _Worker:
                     self._end(self.claimed, "uncertain", reason)
                 store.fail_pending(self.db, self.job_id, reason, eqp=self.eqp)
                 return
+
+    def _give_up(self, reason: str) -> None:
+        # 잡은 파일의 put 까지 끝났으면 대상에 무엇이 있는지 모릅니다. 근거 없이 실패로 두지 않습니다.
+        # 이미 끝낸 파일이면 in_progress 가 아니라 move_file 이 아무것도 바꾸지 않습니다.
+        if self.claimed is not None:
+            self._end(self.claimed, *(("uncertain", f"검증 전 {reason}") if self.put_done else ("failed", reason)))
+        store.fail_pending(self.db, self.job_id, reason, eqp=self.eqp)
 
     def _end(self, path: str, to: str, reason: str | None = None, temp_path: str | None = None) -> None:
         store.move_file(self.db, self.job_id, self.eqp, path, "in_progress", to, reason=reason, temp_path=temp_path)
@@ -161,15 +162,20 @@ class _Worker:
         self._end(path, *(("verified",) if ok else ("failed", "해시 불일치")))
 
     def _snapshot(self, path: str) -> bytes | None:
-        """스냅샷 바이트. 전송 상한을 넘으면 None(상한 + 1 바이트까지만 읽습니다)."""
+        """스냅샷 바이트. manifest 크기가 전송 상한을 넘으면 None.
+
+        상한은 manifest 크기로 판정하고, 읽기는 기대 크기 + 1 바이트까지만 합니다. 수집 뒤 커진 파일은
+        크기 초과가 아니라 손상입니다.
+        """
+        expected = self.plan["sizes"][path]
+        if expected > self.max_bytes:
+            return None
         try:
             with open(Path(self.plan["snapshot_dir"]) / path.lstrip("/"), "rb") as f:
-                data = f.read(self.max_bytes + 1)
+                data = f.read(expected + 1)
         except OSError:
             raise _SnapshotDamaged from None
-        if len(data) > self.max_bytes:
-            return None
-        if hashlib.sha256(data).hexdigest() != self.plan["manifest"].get(path):
+        if len(data) != expected or hashlib.sha256(data).hexdigest() != self.plan["manifest"][path]:
             raise _SnapshotDamaged
         return data
 

@@ -277,7 +277,7 @@ def test_an_unexpected_worker_error_ends_that_target_without_leaving_files_in_pr
 
 
 def test_an_oversized_snapshot_file_is_refused_without_reading_it_whole(make, fleet, tmp_path):
-    # 상한을 넘는 파일은 상한 + 1 바이트만 읽으니 해시하지 않습니다: 내용이 달라도 "스냅샷 손상"이 아닙니다.
+    # 상한은 manifest 크기로 판정하고 스냅샷을 읽지 않습니다: 내용이 달라도 "스냅샷 손상"이 아닙니다.
     app, c = make(transfer_max_bytes=4)
     job_id = start(c, targets=["6MCDE305"])
     collect(app, store.claim_next_waiting(app.config["DB_PATH"]))
@@ -291,3 +291,37 @@ def test_an_oversized_snapshot_file_is_refused_without_reading_it_whole(make, fl
         (A_TIF, "전송 크기 상한 초과"),
         (layout.idp_path("ABC_GATE", "W1", "P2"), "전송 크기 상한 초과"),
     }
+
+
+def test_a_snapshot_file_that_grew_past_the_cap_after_collection_is_damage_not_size(make, fleet, tmp_path):
+    app, c = make(transfer_max_bytes=16)
+    job_id = start(c, targets=["6MCDE305"])
+    collect(app, store.claim_next_waiting(app.config["DB_PATH"]))
+    (tmp_path / "snapshots" / str(job_id) / P1_IDP.lstrip("/")).write_bytes(bytes(17))
+
+    transfer_job(app, job_id)
+
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert job["file_counts"] == counts(failed=5)
+    assert {p["reason"] for p in job["problems"]} == {"스냅샷 손상"}
+    assert recipe_files(fleet["6MCDE305"]) == {}
+
+
+def test_a_login_refused_on_reconnect_after_put_leaves_that_file_uncertain(make, fleet):
+    tool = fleet["6MCDE305"]
+
+    def drop_then_lock_out(path):
+        if path == A_TIF:
+            tool.refuse_login = True
+            raise ConnectionResetError("injected")
+
+    tool.on_download = drop_then_lock_out  # put 뒤 재다운로드 직전
+    app, c = make()
+    job_id = start(c, targets=["6MCDE305"])
+    run_until_idle(app)
+
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert job["file_counts"] == counts(verified=1, uncertain=1, failed=3)
+    states = {p["path"]: (p["state"], p["reason"]) for p in job["problems"]}
+    assert states[A_TIF] == ("uncertain", "검증 전 로그인 거부: 530 Login incorrect.")
+    assert {r for st, r in states.values() if st == "failed"} == {"로그인 거부: 530 Login incorrect."}
