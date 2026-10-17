@@ -30,13 +30,17 @@ class _Blocked(Exception):
     """메시지가 그대로 공개 차단 사유가 되는 수집 오류."""
 
 
+class _MissingIdp(_Blocked):
+    pass
+
+
 def _recipe_files(ftp, class_name: str, idw: str, idp: str):
     """레시피의 파일 목록(경로·크기·mtime). 받을 파일 목록이자 변경 탐지의 비교 대상입니다."""
     # include_idw 는 아직 늘 0 입니다. `.idw` 는 티켓 07.
     idp_file = layout.idp_path(class_name, idw, idp)
     found = [f for f in ftp.list_details(layout.idw_dir(class_name, idw)) if f.path == idp_file and not f.is_dir]
     if not found:
-        raise _Blocked(f"수집 오류: 레시피 파일이 없습니다: {idp_file}")
+        raise _MissingIdp(f"수집 오류: 레시피 파일이 없습니다: {idp_file}")
     yield found[0]
     raw = layout.raw_dir(class_name, idw, idp)
     for f in walk_files(ftp, raw):
@@ -47,7 +51,7 @@ def _recipe_files(ftp, class_name: str, idw: str, idp: str):
 
 def _listing(ftp, class_name: str, recipes) -> dict:
     return {
-        (idw, idp): [(f.path, f.size, f.modified) for f in _recipe_files(ftp, class_name, idw, idp)]
+        (idw, idp): sorted((f.path, f.size, f.modified) for f in _recipe_files(ftp, class_name, idw, idp))
         for idw, idp in recipes
     }
 
@@ -108,7 +112,11 @@ def collect(app: Flask, job: dict) -> None:
                         budget -= len(data)
                         _save(app, snap, path, data)
                         manifest.append((path, len(data), hashlib.sha256(data).hexdigest()))
-                if _listing(ftp, job["class_name"], recipes) == before:
+                try:
+                    after = _listing(ftp, job["class_name"], recipes)
+                except _MissingIdp:  # 편집기가 .idp를 교체하는 중이면 한 번 더 수집합니다.
+                    after = None
+                if after == before:
                     break
             else:
                 raise _Blocked("원본이 바뀌는 중")

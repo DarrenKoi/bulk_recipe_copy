@@ -373,3 +373,50 @@ def test_source_edited_during_both_passes_blocks_and_leaves_no_snapshot(app_clie
     assert job["manifest"]["file_count"] == 0
     assert sum(job["file_counts"].values()) == 0
     assert not (tmp_path / "snapshots" / str(job_id)).exists()
+
+
+def test_a_listing_that_only_changes_order_is_not_a_source_change(app_client, fleet):
+    app, c = app_client
+    src = fleet["6MCDE301"]
+    plain = src.list_details
+    flips = []
+
+    def flipping(remote_dir, *args, **kwargs):
+        flips.append(remote_dir)
+        out = plain(remote_dir, *args, **kwargs)
+        return out[::-1] if len(flips) % 2 else out
+
+    src.list_details = flipping
+    job_id = c.post("/api/jobs", json=body()).json["id"]
+    run_until_idle(app)
+    assert c.get(f"/api/jobs/{job_id}").json["collection"] == {"state": "done", "reason": None}
+
+
+def test_an_idp_briefly_missing_after_the_first_pass_is_collected_again(app_client, fleet):
+    # 편집기가 .idp를 지웠다 다시 쓰는 사이에 수집 후 목록이 걸린 경우입니다.
+    app, c = app_client
+    src = fleet["6MCDE301"]
+    idp = layout.idp_path("ABC_GATE", "W1", "P1")
+    saved = src.files[idp]
+    downloads = []
+
+    def remove_on_last_download_of_first_pass(path):
+        downloads.append(path)
+        if len(downloads) == 5:
+            del src.files[idp]
+
+    plain = src.list_details
+
+    def restore_after_it_was_seen_missing(remote_dir, *args, **kwargs):
+        out = plain(remote_dir, *args, **kwargs)
+        if idp not in src.files and remote_dir == layout.idw_dir("ABC_GATE", "W1"):
+            src.files[idp] = saved
+        return out
+
+    src.on_download = remove_on_last_download_of_first_pass
+    src.list_details = restore_after_it_was_seen_missing
+    job_id = c.post("/api/jobs", json=body()).json["id"]
+    run_until_idle(app)
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert job["collection"] == {"state": "done", "reason": None}
+    assert job["manifest"]["file_count"] == 5
