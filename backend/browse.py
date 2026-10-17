@@ -1,20 +1,50 @@
 """원본 탐색 API: class 목록, 레시피 목록, raw 폴더 요약."""
 
 import ftplib
+import time
 
 from flask import Flask
 
-from ftp_handler.core.client import FtpClient
+from ftp_handler.core.client import FtpClient, ListingTooLarge, TransferTimeout
 
 from . import layout
 from .roster import hitachi_tools
 
 
 class HitachiFtpClient(FtpClient):
-    def list_idp_files(self, data_dir: str):
+    def list_idp_files(self, data_dir: str, **limits):
         # 스펙은 LIST 1회. Hitachi 서버의 명령·응답 형식이 OFFICE-VERIFY 라 티켓 13에서 구현합니다.
         # idw 폴더마다 LIST(N+1)로 바꾸는 것은 사용자가 정할 일이라 폴백을 넣지 않습니다.
-        raise NotImplementedError("레시피 목록 명령은 티켓 13(사무실 회신 G) 뒤에 구현합니다.")
+        raise NotImplementedError("레시피 목록 명령 미확정, 티켓 13")
+
+
+class _Bounded:
+    """탐색 요청 하나의 LIST들이 시간·항목 예산 하나를 나눠 씁니다.
+
+    LIST마다 따로 상한을 두면 큰 하위 트리나 조금씩 응답하는 장비가 요청 스레드를 계속 잡습니다.
+    """
+
+    def __init__(self, ftp, seconds: float, entries: int) -> None:
+        self._ftp, self._end, self._entries = ftp, time.monotonic() + seconds, entries
+        self.seconds, self.max_entries = seconds, entries
+
+    def _limits(self) -> dict:
+        left = self._end - time.monotonic()
+        if left <= 0:
+            raise TransferTimeout(f"browse exceeded {self.seconds}s")
+        if self._entries <= 0:
+            raise ListingTooLarge(f"browse has over {self.max_entries} entries")
+        return {"deadline": left, "max_entries": self._entries}
+
+    def _spend(self, entries: list) -> list:
+        self._entries -= len(entries)
+        return entries
+
+    def list_details(self, remote_dir: str, pattern: str | None = None):
+        return self._spend(self._ftp.list_details(remote_dir, pattern, **self._limits()))
+
+    def list_idp_files(self, data_dir: str):
+        return self._spend(self._ftp.list_idp_files(data_dir, **self._limits()))
 
 
 def _raw_summary(ftp, remote_dir: str) -> tuple[int, int]:
@@ -42,9 +72,17 @@ def register_browse(app: Flask) -> None:
             return error_json("unknown_tool", f"명부에 없는 Hitachi 장비입니다: {eqp}", 404)
         try:
             with app.config["CONNECT"](tools[eqp]) as ftp:
-                return op(ftp)
+                return op(_Bounded(ftp, app.config["BROWSE_SECONDS"], app.config["BROWSE_MAX_ENTRIES"]))
         except ValueError as exc:
             return error_json("bad_path", str(exc), 400)
+        except NotImplementedError as exc:
+            return error_json("not_implemented", str(exc), 501)
+        except TransferTimeout:
+            secs = app.config["BROWSE_SECONDS"]
+            return error_json("browse_timeout", f"{eqp}: 탐색이 {secs}초 안에 끝나지 않았습니다.", 502)
+        except ListingTooLarge:
+            n = app.config["BROWSE_MAX_ENTRIES"]
+            return error_json("browse_too_large", f"{eqp}: 탐색할 항목이 {n}개를 넘습니다.", 502)
         except (OSError, EOFError, ftplib.Error) as exc:
             # 빈 목록으로 숨기지 않습니다. "레시피 없음"과 "장비에 못 닿음"은 다릅니다.
             return error_json("tool_unreachable", f"{eqp}: {type(exc).__name__}: {exc}", 502)

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from ftplib import error_perm
 from pathlib import PurePosixPath
 
-from ftp_handler.core.client import FileInfo
+from ftp_handler.core.client import FileInfo, ListingTooLarge, TransferTimeout
 
 from . import layout
 
@@ -20,6 +20,7 @@ class FakeTool:
         self.files: dict[str, tuple[bytes, datetime]] = {}
         self.dirs: set[str] = set()  # 빈 폴더만 적으면 됩니다. 파일의 상위 폴더는 저절로 있습니다.
         self.reachable = True
+        self.stalled = False  # True 면 LIST가 끝나지 않는 장비처럼 deadline 에 걸립니다.
 
     def add(self, path: str, data: bytes, mtime: datetime) -> None:
         self.files[path] = (data, mtime)
@@ -48,7 +49,17 @@ class FakeTool:
     def __exit__(self, *exc: object) -> None:
         pass
 
-    def list_details(self, remote_dir: str, pattern: str | None = None, **_) -> list[FileInfo]:
+    def list_details(
+        self,
+        remote_dir: str,
+        pattern: str | None = None,
+        *,
+        max_entries: int | None = None,
+        deadline: float | None = None,
+        **_,
+    ) -> list[FileInfo]:
+        if self.stalled:
+            raise TransferTimeout(f"LIST {remote_dir} exceeded {deadline}s")
         remote_dir = remote_dir.rstrip("/") or "/"
         dirs = self._all_dirs()
         if remote_dir not in dirs:
@@ -62,6 +73,8 @@ class FakeTool:
             p = PurePosixPath(path)
             if str(p.parent) == remote_dir and (pattern is None or p.match(pattern)):
                 out.append(FileInfo(p.name, path, False, len(data), mtime, ""))
+        if max_entries is not None and len(out) > max_entries:
+            raise ListingTooLarge(f"{remote_dir} has over {max_entries} LIST lines")
         return out
 
     def download(self, remote_path: str, **_) -> bytes:
@@ -70,13 +83,13 @@ class FakeTool:
         except KeyError:
             raise error_perm(f"550 {remote_path}: No such file or directory") from None
 
-    def list_idp_files(self, data_dir: str) -> list[FileInfo]:
+    def list_idp_files(self, data_dir: str, **limits) -> list[FileInfo]:
         """`data/*/*.idp`를 한 번에. 실제 장비의 명령은 티켓 13에서 정합니다."""
         return [
             f
-            for d in self.list_details(data_dir)
+            for d in self.list_details(data_dir, **limits)
             if d.is_dir
-            for f in self.list_details(d.path, "*.idp")
+            for f in self.list_details(d.path, "*.idp", **limits)
             if not f.is_dir
         ]
 

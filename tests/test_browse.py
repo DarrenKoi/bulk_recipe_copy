@@ -3,6 +3,7 @@ from datetime import datetime
 import pytest
 
 from backend import create_app, layout
+from backend.browse import HitachiFtpClient
 from backend.fake_fleet import KST, FakeTool
 from backend.roster import Tool
 
@@ -27,18 +28,27 @@ def fleet():
 
 
 @pytest.fixture
-def client(tmp_path, fleet):
-    app = create_app(
-        roster=lambda: ROSTER,
-        connect=lambda tool: fleet[tool.eqp_id],
-        db_path=tmp_path / "brc.sqlite3",
-        snapshot_dir=tmp_path / "snapshots",
-        allowed_users={"engineer1"},
-        spa_dir=tmp_path / "no-spa",
-    )
-    c = app.test_client()
-    c.set_cookie("LASTUSER", "engineer1")
-    return c
+def make_client(tmp_path, fleet):
+    def make(**settings):
+        app = create_app(
+            roster=lambda: ROSTER,
+            connect=lambda tool: fleet[tool.eqp_id],
+            db_path=tmp_path / "brc.sqlite3",
+            snapshot_dir=tmp_path / "snapshots",
+            allowed_users={"engineer1"},
+            spa_dir=tmp_path / "no-spa",
+            **settings,
+        )
+        c = app.test_client()
+        c.set_cookie("LASTUSER", "engineer1")
+        return c
+
+    return make
+
+
+@pytest.fixture
+def client(make_client):
+    return make_client()
 
 
 def test_layout_assembles_the_fixed_recipe_paths():
@@ -112,3 +122,36 @@ def test_dot_dot_path_component_is_refused(client):
     resp = client.get("/api/tools/6MCDE301/classes/ABC_GATE/recipes/W1/..")
     assert resp.status_code == 400
     assert resp.json["error"]["code"] == "bad_path"
+
+
+def test_stalled_listing_is_502_browse_timeout(make_client, fleet):
+    fleet["6MCDE301"].stalled = True
+    resp = make_client(browse_seconds=3).get("/api/tools/6MCDE301/classes")
+    assert resp.status_code == 502
+    assert resp.json == {
+        "error": {"code": "browse_timeout", "message": "6MCDE301: 탐색이 3초 안에 끝나지 않았습니다."}
+    }
+
+
+def test_entry_budget_is_shared_by_every_listing_of_one_browse(make_client):
+    # raw 폴더 최상위가 2개(a.tif, sub)라 예산 2를 다 쓰고, sub 를 읽기 전에 멈춥니다.
+    c = make_client(browse_max_entries=2)
+    resp = c.get("/api/tools/6MCDE301/classes/ABC_GATE/recipes/W1/P1")
+    assert resp.status_code == 502
+    assert resp.json == {
+        "error": {"code": "browse_too_large", "message": "6MCDE301: 탐색할 항목이 2개를 넘습니다."}
+    }
+    # 다음 요청은 새 예산으로 시작합니다.
+    assert c.get("/api/tools/6MCDE301/classes").json == {"classes": ["ABC_GATE", "EMPTY_CLASS"]}
+
+
+def test_undecided_recipe_list_command_is_501_with_reason(make_client, fleet):
+    class Undecided(FakeTool):
+        list_idp_files = HitachiFtpClient.list_idp_files
+
+    fleet["6MCDE301"] = Undecided()
+    resp = make_client().get("/api/tools/6MCDE301/classes/ABC_GATE/recipes")
+    assert resp.status_code == 501
+    assert resp.json == {
+        "error": {"code": "not_implemented", "message": "레시피 목록 명령 미확정, 티켓 13"}
+    }

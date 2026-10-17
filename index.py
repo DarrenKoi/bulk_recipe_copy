@@ -40,6 +40,8 @@ application = create_app(
     snapshot_dir=VAR / "snapshots",
     allowed_users=allowed | {DEV_USER} if DEV else allowed,
     dev_user=DEV_USER if DEV else None,
+    browse_seconds=float(os.environ.get("BRC_BROWSE_SECONDS", 5)),
+    browse_max_entries=int(os.environ.get("BRC_BROWSE_MAX_ENTRIES", 5000)),
 )
 
 if __name__ == "__main__":

@@ -48,12 +48,14 @@ function detail(r: Recipe) {
 async function toggle(r: Recipe) {
   const id = rid(r)
   opened.value = opened.value === id ? null : id
-  if (opened.value === null || summaries.value[id]) return
-  summaries.value[id] = 'loading'
+  const cache = summaries.value
+  if (opened.value === null || cache[id]) return
+  // class를 바꾸면 summaries 가 새 객체가 됩니다. 늦게 온 결과는 요청 때의 객체에만 적습니다.
+  cache[id] = 'loading'
   try {
-    summaries.value[id] = await $fetch<Summary>(api('classes', cls.value!, 'recipes', r.idw, r.idp))
+    cache[id] = await $fetch<Summary>(api('classes', cls.value!, 'recipes', r.idw, r.idp))
   } catch (e) {
-    summaries.value[id] = { error: reason(e) }
+    cache[id] = { error: reason(e) }
   }
 }
 

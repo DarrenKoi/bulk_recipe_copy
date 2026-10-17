@@ -37,6 +37,8 @@ def create_app(
     allowed_users: Collection[str],
     dev_user: str | None = None,
     spa_dir: Path = DEFAULT_SPA_DIR,
+    browse_seconds: float = 5.0,
+    browse_max_entries: int = 5000,
 ) -> Flask:
     """`dev_user` 는 쿠키가 없을 때 쓸 신원입니다. 집 개발 실행만 넣고 운영은 None."""
     app = Flask(__name__)
@@ -50,6 +52,8 @@ def create_app(
         DB_PATH=db_path,
         SNAPSHOT_DIR=snapshot_dir,
         ALLOWED_USERS=frozenset(allowed_users),
+        BROWSE_SECONDS=browse_seconds,
+        BROWSE_MAX_ENTRIES=browse_max_entries,
     )
 
     @app.before_request

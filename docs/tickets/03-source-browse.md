@@ -19,5 +19,7 @@ idp, 수정 시각)가 뜹니다. 이름으로 거르고 수정 시각으로 정
 - [x] pytest가 가짜 장비로 세 API와 502를 시험함
 
 **Notes:** 실제 장비의 레시피 목록은 `backend/browse.py`의 `HitachiFtpClient.list_idp_files` 하나가
-맡고, 지금은 `NotImplementedError`를 냅니다(티켓 13). 그 전까지 운영 앱의 레시피 목록 API는 500입니다.
+맡고, 지금은 `NotImplementedError`를 냅니다(티켓 13). 그 전까지 운영 앱의 레시피 목록 API는 501(`not_implemented`, "레시피 목록 명령 미확정, 티켓 13")입니다.
+탐색 요청 하나는 시간(`BRC_BROWSE_SECONDS`, 기본 5초)과 LIST 항목(`BRC_BROWSE_MAX_ENTRIES`, 기본 5000개)
+예산 하나를 모든 LIST가 나눠 쓰고, 넘으면 502 `browse_timeout` / `browse_too_large`입니다.
 idw 폴더마다 LIST(N+1)로 폴백하지 않았습니다. 그 선택은 사용자가 합니다.
