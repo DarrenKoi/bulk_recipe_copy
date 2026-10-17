@@ -38,7 +38,7 @@ class _Server:
         handler = type("H", (handler_base,), {"authorizer": authorizer})
         self._server = FTPServer(("127.0.0.1", 0), handler)
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._loop)
+        self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     def _loop(self):
@@ -55,11 +55,22 @@ class _Server:
 
 
 @pytest.fixture
-def ftp(tmp_path):
-    server = _Server(tmp_path)
-    with server.client() as c:
+def make_server(tmp_path):
+    servers = []
+
+    def make(handler_base=FTPHandler):
+        servers.append(_Server(tmp_path, handler_base))
+        return servers[-1]
+
+    yield make
+    for server in servers:
+        server.close()
+
+
+@pytest.fixture
+def ftp(make_server):
+    with make_server().client() as c:
         yield c
-    server.close()
 
 
 def _files(root):
@@ -87,12 +98,10 @@ def test_put_overwrite_replaces_existing_file(ftp, tmp_path):
     assert _files(tmp_path) == ["a.idp"]
 
 
-def test_put_overwrite_on_server_whose_rnto_refuses_existing(tmp_path):
+def test_put_overwrite_on_server_whose_rnto_refuses_existing(make_server, tmp_path):
     (tmp_path / "a.idp").write_bytes(b"old")
-    server = _Server(tmp_path, NoClobberRenameHandler)
-    with server.client() as c:
+    with make_server(NoClobberRenameHandler).client() as c:
         c.put("/a.idp", b"new", overwrite=True)
-    server.close()
     assert (tmp_path / "a.idp").read_bytes() == b"new"
     assert _files(tmp_path) == ["a.idp"]
 
@@ -102,13 +111,11 @@ def test_put_overwrite_without_existing_target(ftp, tmp_path):
     assert (tmp_path / "a.idp").read_bytes() == b"new"
 
 
-def test_put_overwrite_lost_rename_reply_is_uncertain(tmp_path):
+def test_put_overwrite_lost_rename_reply_is_uncertain(make_server, tmp_path):
     (tmp_path / "a.idp").write_bytes(b"old")
-    server = _Server(tmp_path, DropOnRenameHandler)
-    with server.client() as c:
+    with make_server(DropOnRenameHandler).client() as c:
         with pytest.raises(TransferUncertain) as info:
             c.put("/a.idp", b"new", overwrite=True)
-    server.close()
     assert info.value.temp_path.startswith("/a.idp.") and info.value.temp_path.endswith(".part")
     assert (tmp_path / "a.idp").read_bytes() == b"new"
 
