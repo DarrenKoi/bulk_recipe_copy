@@ -26,18 +26,30 @@ def snapshot_bytes(root: Path) -> int:
     return sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
 
 
-def _recipe_paths(ftp, class_name: str, idw: str, idp: str):
+class _Blocked(Exception):
+    """메시지가 그대로 공개 차단 사유가 되는 수집 오류."""
+
+
+def _recipe_files(ftp, class_name: str, idw: str, idp: str):
+    """레시피의 파일 목록(경로·크기·mtime). 받을 파일 목록이자 변경 탐지의 비교 대상입니다."""
     # include_idw 는 아직 늘 0 입니다. `.idw` 는 티켓 07.
-    yield layout.idp_path(class_name, idw, idp)
+    idp_file = layout.idp_path(class_name, idw, idp)
+    found = [f for f in ftp.list_details(layout.idw_dir(class_name, idw)) if f.path == idp_file and not f.is_dir]
+    if not found:
+        raise _Blocked(f"수집 오류: 레시피 파일이 없습니다: {idp_file}")
+    yield found[0]
     raw = layout.raw_dir(class_name, idw, idp)
     for f in walk_files(ftp, raw):
         if not f.path.startswith(raw + "/"):
             raise ValueError(f"레시피 범위 밖의 경로입니다: {f.path!r}")
-        yield f.path
+        yield f
 
 
-class _Blocked(Exception):
-    """메시지가 그대로 공개 차단 사유가 되는 수집 오류."""
+def _listing(ftp, class_name: str, recipes) -> dict:
+    return {
+        (idw, idp): [(f.path, f.size, f.modified) for f in _recipe_files(ftp, class_name, idw, idp)]
+        for idw, idp in recipes
+    }
 
 
 def _save(app: Flask, snap: Path, path: str, data: bytes) -> None:
@@ -70,7 +82,6 @@ def collect(app: Flask, job: dict) -> None:
     snap = root / str(job["id"])
     shutil.rmtree(snap, ignore_errors=True)
     recipes = sorted({(idw, idp) for _, idw, idp in job["pairs"]})
-    manifest, recipe_paths = [], {}
     try:
         cap = app.config["SNAPSHOT_CAP_BYTES"]
         try:
@@ -82,17 +93,26 @@ def collect(app: Flask, job: dict) -> None:
         if job["source_eqp"] not in tools:
             raise LookupError(f"명부에 없는 Hitachi 장비입니다: {job['source_eqp']}")
         with app.config["CONNECT"](tools[job["source_eqp"]]) as ftp:
-            for idw, idp in recipes:
-                paths = recipe_paths[(idw, idp)] = []
-                for path in _recipe_paths(ftp, job["class_name"], idw, idp):
-                    try:
-                        data = ftp.download(path, max_bytes=max(left, 0))
-                    except TransferTooLarge:
-                        raise _Blocked(f"수집 오류: 스냅샷 총량 상한 {cap} B를 넘습니다.") from None
-                    left -= len(data)
-                    _save(app, snap, path, data)
-                    paths.append(path)
-                    manifest.append((path, len(data), hashlib.sha256(data).hexdigest()))
+            # 수집 전후 목록이 같아야 스냅샷을 씁니다. 탐지이지 증명이 아닙니다(스펙 "스냅샷 수집"):
+            # 두 목록 사이에 크기·mtime이 같게 바뀐 파일(LIST mtime은 분 단위일 수 있음)은 못 잡습니다.
+            for _ in range(2):
+                shutil.rmtree(snap, ignore_errors=True)
+                before = _listing(ftp, job["class_name"], recipes)
+                budget, manifest = left, []
+                for files in before.values():
+                    for path, _, _ in files:
+                        try:
+                            data = ftp.download(path, max_bytes=max(budget, 0))
+                        except TransferTooLarge:
+                            raise _Blocked(f"수집 오류: 스냅샷 총량 상한 {cap} B를 넘습니다.") from None
+                        budget -= len(data)
+                        _save(app, snap, path, data)
+                        manifest.append((path, len(data), hashlib.sha256(data).hexdigest()))
+                if _listing(ftp, job["class_name"], recipes) == before:
+                    break
+            else:
+                raise _Blocked("원본이 바뀌는 중")
+        recipe_paths = {r: [path for path, _, _ in files] for r, files in before.items()}
         store.finish_collection(
             db, job["id"], manifest=manifest, manifest_hash=manifest_hash(manifest),
             snapshot_dir=snap, pairs=job["pairs"], recipe_paths=recipe_paths,

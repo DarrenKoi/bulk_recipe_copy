@@ -21,6 +21,7 @@ class FakeTool:
         self.dirs: set[str] = set()  # 빈 폴더만 적으면 됩니다. 파일의 상위 폴더는 저절로 있습니다.
         self.reachable = True
         self.stalled = False  # True 면 LIST가 끝나지 않는 장비처럼 deadline 에 걸립니다.
+        self.on_download = None  # 테스트용: download(path) 직전에 불립니다. 수집 중 원본 변경 흉내.
 
     def add(self, path: str, data: bytes, mtime: datetime) -> None:
         self.files[path] = (data, mtime)
@@ -78,6 +79,8 @@ class FakeTool:
         return out
 
     def download(self, remote_path: str, *, max_bytes: int | None = None, **_) -> bytes:
+        if self.on_download:
+            self.on_download(remote_path)
         try:
             data = self.files[remote_path][0]
         except KeyError:

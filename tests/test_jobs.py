@@ -1,5 +1,5 @@
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -335,3 +335,41 @@ def test_a_symlink_loop_in_the_snapshot_folder_does_not_leak_local_paths(app_cli
     assert job["collection"]["state"] == "blocked"
     assert job["collection"]["reason"].startswith("수집 오류: 로컬 저장 실패(")
     assert str(tmp_path) not in job["collection"]["reason"]
+
+
+def _edit_a_tif_during(src, passes):
+    """수집 pass 의 마지막 download 때(이미 받은 뒤) 원본 `a.tif`를 고칩니다. pass 는 5파일."""
+    a_tif = layout.raw_dir("ABC_GATE", "W1", "P1") + "/a.tif"
+    calls = []
+
+    def edit(path):
+        calls.append(path)
+        n, nth = divmod(len(calls) - 1, 5)
+        if nth == 4 and n < passes:
+            src.add(a_tif, f"edited {n}".encode(), T + timedelta(minutes=n + 1))
+
+    src.on_download = edit
+    return a_tif
+
+
+def test_source_edited_during_the_first_pass_is_collected_again_with_the_new_bytes(app_client, fleet, tmp_path):
+    app, c = app_client
+    a_tif = _edit_a_tif_during(fleet["6MCDE301"], passes=1)
+    job_id = c.post("/api/jobs", json=body()).json["id"]
+    run_until_idle(app)
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert job["collection"] == {"state": "done", "reason": None}
+    assert job["manifest"]["file_count"] == 5
+    assert (tmp_path / "snapshots" / str(job_id) / a_tif.lstrip("/")).read_bytes() == b"edited 0"
+
+
+def test_source_edited_during_both_passes_blocks_and_leaves_no_snapshot(app_client, fleet, tmp_path):
+    app, c = app_client
+    _edit_a_tif_during(fleet["6MCDE301"], passes=2)
+    job_id = c.post("/api/jobs", json=body()).json["id"]
+    run_until_idle(app)
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert job["collection"] == {"state": "blocked", "reason": "원본이 바뀌는 중"}
+    assert job["manifest"]["file_count"] == 0
+    assert sum(job["file_counts"].values()) == 0
+    assert not (tmp_path / "snapshots" / str(job_id)).exists()
