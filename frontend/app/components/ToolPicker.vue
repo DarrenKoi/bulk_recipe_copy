@@ -70,7 +70,15 @@ const shown = computed(() => {
           @click="selected = t.eqp_id"
         >
           <td class="py-2 font-mono tabular-nums text-(--sk-ink)">
-            {{ t.eqp_id }}
+            <label class="flex cursor-pointer items-center gap-2">
+              <input
+                v-model="selected"
+                type="radio"
+                name="source-tool"
+                :value="t.eqp_id"
+              >
+              {{ t.eqp_id }}
+            </label>
           </td>
           <td class="text-(--sk-ink)">
             {{ t.fab_name }}
