@@ -1,0 +1,174 @@
+# ───────────────────────────────────────────────
+# Local agent / editor state
+# ───────────────────────────────────────────────
+# .remember/ is local-only scratch — session buffers, daily notes, the handoff
+# baton. It used to sync via .remember/.gitignore (an allowlist for remember.md
+# and the rolled history); that file is now inert, since git never descends into
+# an ignored directory. Nothing under .remember/ reaches the office checkout.
+.remember/
+.claude/settings.local.json
+.playwright-mcp
+
+# IDEs & editors
+.idea/
+.vscode/
+.fleet/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ───────────────────────────────────────────────
+# Python
+# ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging / build
+build/
+dist
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# Test / type / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ───────────────────────────────────────────────
+# Nuxt / Node (frontend/)
+# ───────────────────────────────────────────────
+node_modules/
+
+# Nuxt build / dev outputs
+.nuxt/
+.output/
+# Teammate Vite apps (apps/<slug>/) build into frontend/public/ws/<slug>/ so
+# the SPA build ships them. Built at the office before `nuxt generate`, never
+# committed -- docs/contributing/in-repo/README.md.
+frontend/public/ws/
+.nitro/
+.cache/
+.data/
+
+# Package manager debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ───────────────────────────────────────────────
+# Logs & env
+# ───────────────────────────────────────────────
+logs/
+*.log
+
+# uWSGI touch-reload trigger — the deploy root's restart.txt (wsgi.ini names
+# it). Touched by the nightly reload job on whichever host runs uWSGI; it is
+# state, not config. Anchored to the root so a restart.txt someone adds under
+# docs/ or rag_sources/ is still tracked.
+/restart.txt
+
+# Local generated previews
+SKEWNONO CD-SEM Viewer _standalone_.html
+ea3138ca-4157-449d-a379-186a3db9af06.png
+
+.env
+.env.*
+!.env.example
+
+# Local office object-storage configuration may contain credentials.
+minio_handler/minio_config.py
+
+# Superpowers brainstorming visual companion
+.superpowers/
+.worktrees/
+
+# Access-control exception lists (managed via /admin/access, per-deployment state)
+backend/storage/access_exceptions.json
+backend/access_control/state/access_exceptions.json
+backend/ebeam/tool_files/state/grants.json
+
+# Chat feature local store (home/Phase 1)
+backend/chat/chat.db
+backend/chat/*.db
+
+# Office data adapters (Phase 2/3): created per-environment by copying
+# providers/office_example.py -> providers/office.py, then implemented at the
+# office. Never tracked, so `git pull` at the office can never conflict on it.
+# `**` covers nested provider folders too (e.g. ebeam/hardware/providers/fdc/).
+# The second pattern covers per-tab adapters (e.g. hardware/providers/fdc/office.py).
+backend/**/providers/office.py
+backend/**/providers/**/office.py
+# live_alarm's writer has a second swap surface OUTSIDE providers/ — its
+# office.py holds the in-house alarm API URLs and must never be tracked.
+backend/**/writer/office.py
+# `scripts.sync_office_adapters --force` writes office.py.bak beside the
+# adapter before overwriting it. That backup holds the same 사내 details as the
+# adapter, so an untracked one at the office is a `git add -A` away from being
+# committed. Ignore it wherever office.py itself is ignored.
+backend/**/providers/office.py.bak
+backend/**/providers/**/office.py.bak
+backend/**/writer/office.py.bak
+
+# msr_image office FTP cache dir + explicit office adapter (already matched by
+# the glob above; listed explicitly for clarity on this feature).
+var/
+backend/msr_image/providers/office.py
+
+# The office chat RAG is a separate 사내 git repository checked out INSIDE this
+# tree at backend/chat/_rag/ (see backend/chat/rag.py). Its own
+# .git keeps working there; this repo must never track it — it carries manual
+# content, a built index and 사내 model endpoints. The leading underscore keeps
+# the app factory, the office registry and the deploy pack from walking it.
+backend/chat/_rag/
+
+# scripts/probe_recipe_ftp.py dumps the .idp files it pulls off tool FTP here.
+# Real recipe payloads -- never committed.
+.ftp-probe/
+
+# `office_utils` is an 사내 package that exists ONLY on office machines; the
+# recipe_search adapter imports it to parse .idp recipe files. At home a
+# fabricated stand-in of the same name sits here so that adapter can be written
+# and run -- and it must NEVER be tracked, in either direction:
+#   pushed  -> it would shadow the real package at the office and serve
+#              fabricated recipe data from production, at HTTP 200.
+#   pulled  -> a tracked copy would carry 사내 parser details out of the office.
+# Same rule, same reason, as providers/office.py above.
+# No trailing slash on purpose: a dir-only pattern would stop matching the
+# moment office_utils is a symlink to a copy kept outside the worktree (git
+# classifies a symlink as a file), and the link would surface as untracked.
+/office_utils
+
+# Playwright test runner artifacts (the MCP session dumps live in .playwright-mcp/).
+# No leading slash, so this matches at any depth -- frontend/test-results/
+# and any future workspace's included.
+test-results/
+
+# Vendor/publisher PDFs dropped under docs/research/ for reference. This repo is
+# PUBLIC so the office can pull it anonymously, and the papers we read (e.g. the
+# SPIE Kawada 2009 CD-matching paper) are paywalled — cite them by DOI in the
+# Markdown instead of redistributing the file.
+docs/research/*.pdf

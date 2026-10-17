@@ -1,0 +1,1079 @@
+Recipe 열어보기(recipe open) — 장비 FTP 의 IDP 원본 파일
+
+Recipe 검색 결과 table 의 "자세히 보기" 를 눌렀을 때 보여줄 데이터의 원천입니다.
+DB 가 아니라 **장비 FTP 에 있는 recipe 파일**이며, 파일을 내려받은 뒤 사무실 전용
+파서(`office_utils/read_idp_info.py`)를 통과시켜 3개 table 로 만듭니다.
+
+소스 체인
+=========
+
+경로는 Redis registry 에서 먼저 찾고, 없으면 측정 이력에서 찾습니다.
+
+  1순위: Redis (recipe_name_list.txt)
+    v3_{cdsem|hvsem}_rcp_loc_{fab}       [idw_name, idp_name]
+    v3_{cdsem|hvsem}_tools_in_rcp_{fab}  [eqp_id, ...]  ─► sem_list 로 eqp_ip
+    full_name 의 "/" 앞부분                ─► class_name
+
+  2순위: OpenSearch meas_hist_cdsem / meas_hist_hvsem
+    ├── eqp_ip       ─────────────────►  FTP host
+    ├── class_name   ──┐
+    ├── idw_name     ──┼──────────────►  /HITACHI/DEVICE/HD/{class_name}/data/{idw_name}
+    └── idp_name     ──┘                      ├── {idp_name}.idp    ← 파싱 대상
+                                              └── {idp_name}/       ← raw recipe 파일 폴더
+
+  {idp_name}.idp  ──►  office_utils.read_idp_info.combined_idp_info(idp_file_path)
+                         ──►  read_idp_info: dict[str, pd.DataFrame]
+
+두 경로는 **섞지 않습니다**. registry 가 둘 중 하나라도 답하지 못하면 (또는
+fab 이 지정되지 않으면) 전체를 meas_hist 로 넘깁니다 — 절반씩 조립한 경로는
+나중에 그 경로가 틀렸을 때 출처를 추적할 수 없기 때문입니다.
+
+여기서 "답하지 못하면"은 값이 비어 있거나 항목이 부족한 **정상 조회 결과**를
+말합니다. Redis 자체가 응답하지 않거나(연결 끊김) sem_list 조회가 실패하는
+경우는 폴백 대상이 **아닙니다** — 그런 예외는 meas_hist 로 넘어가지 않고 그대로
+올라갑니다(502/503).
+
+장비 선택
+
+  두 경로 모두 후보를 **여러 개** 돌려주고, 다운로드가 순서대로 시도해 먼저
+  성공한 것을 씁니다. registry 경로는 sem_list 의 available="On" 장비를 앞에
+  두고 registry 순서를 유지하며, meas_hist 경로는 최근 측정 순입니다. 장비 한
+  대가 꺼져 있다고 recipe 를 열 수 없게 되지 않도록 하기 위함입니다.
+
+  eqp_ip 가 허용 subnet 밖이면 그 후보만 건너뛰고 WARNING 을 남깁니다. 후보
+  **전부**가 그렇다면 InvalidToolIp 를 그대로 올립니다 — 그때는 전송 실패가
+  아니라 설정 오류이기 때문입니다.
+
+registry 경로에서는 eqp_id -> eqp_ip 해석에 sem_list 가 필요합니다(lateral
+check 와 같은 join). meas_hist 경로에서만 측정 이력 문서가 그 recipe 를 실행한
+장비를 이미 지목하므로 join 이 필요 없습니다.
+
+경로 표기 (office 확인 2026-07-27)
+
+  meas_hist 의 idp_name / idw_name 은 **경로 문자열**입니다
+  (예: "/Recipe/ADI/ADI_CD_BIAS_001.idp"). FTP 경로에 들어가는 것은 확장자와
+  디렉터리를 뗀 **stem** 입니다. 즉 data/{idw_name} 은 data/{stem(idw_name)} 이며,
+  파일명은 {stem(idp_name)}.idp 입니다.
+
+  root 는 msr_image 가 쓰는 것과 같습니다(msr_image_ftp.txt). images/{msr} 과
+  data/{idw} 가 형제 폴더입니다. 접속 계정·포트·전송 경로(사무실 Windows PC 는
+  HTTP proxy, 클라우드 Linux 는 직접)도 모두 동일하므로 msr_image 의 설정
+  (SKEWNONO_TOOL_FTP_*)을 그대로 씁니다.
+
+  점검 script: `python -m scripts.probes.probe_recipe_ftp` (repo root 에서 실행).
+  meas_hist 문서 1건을 골라 경로를 조립하고 .idp 를 내려받은 뒤 raw 폴더를
+  목록으로 보여줍니다.
+
+파서 반환 구조 (user-confirmed 2026-07-27)
+==========================================
+
+`combined_idp_info(idp_file_path)` 의 반환값은 key 3개짜리 dict 이며 각 value 는
+pandas DataFrame 입니다.
+
+  wafer_mp_info     -> wafer measurement point table
+  wafer_align_info  -> wafer alignment point table
+  idp_image_info    -> parameter 별 image 정의 table
+
+★ `office_utils` 는 **사무실에만 있는 폴더**입니다. 따라서 컬럼 이름이 어긋나면
+  집에서는 통과하고 사무실에서만 깨집니다 — 이 문서의 컬럼 이름이 계약입니다.
+  집(Phase 1)에서는 저장소 root 의 `office_utils/` 가 같은 이름으로 이 자리를
+  대신합니다. 아래 "집에서의 대역" 절을 참고하십시오.
+
+★ 반환 구조 불일치 관측 (OFFICE-VERIFY 2026-08-03) — 클라우드에서 recipe open 이
+  `'<' not supported between instances of 'dict' and 'dict'` 로 실패했습니다.
+  adapter 의 `_parse_idp` 가 "key 3개짜리 dict 가 아니다" 라고 판단한 뒤 그 사실을
+  적는 도중 `sorted(frames)` 에서 죽은 것이므로, **그 환경의 `combined_idp_info`
+  는 dict 를 원소로 갖는 iterable 을 돌려주었다**는 뜻입니다(dict 끼리 정렬을
+  시도했으니 원소가 dict). 다만 `sorted()` 는 iterable 이면 무엇이든 받으므로
+  list·tuple·Series·ndarray 중 무엇인지까지는 traceback 이 말해 주지 않습니다.
+  위 3-key dict 는 2026-07-27 에 확인된 구조이므로, 사무실 parser 판(version)이
+  그 뒤로 바뀌었는지 **실제 반환값을 다시 확인해야** 합니다.
+
+    python -c "from office_utils.read_idp_info import combined_idp_info as f; \
+      r=f('<.idp 경로>'); print(type(r)); print(r if isinstance(r,dict) else list(r)[:1])"
+
+  확인되면 이 절을 실제 구조로 갱신하십시오. 그때까지 adapter 는
+  `_normalize_frames` 로 **컬럼 이름을 보고** 세 table 을 되찾아 화면을 살려 둡니다
+  (위치로는 추측하지 않습니다 — 순서가 바뀌면 조용히 틀리므로). 되찾을 때마다
+  "이 문서와 parser 가 어긋났다" 는 WARNING 을 남깁니다.
+
+★ 2차 관측 (OFFICE-VERIFY 2026-08-03, 같은 날 두 번째 502) — 위 복구가 낸 502
+  message 가 container 의 정체를 더 좁혀 주었습니다:
+
+    tuple 2개 원소, 각 원소는 **문서화된 key 3개를 모두 가진 dict**
+    (idp_image_info / wafer_align_info / wafer_mp_info)
+
+  즉 parser 는 낱개 table 을 흩어 담은 것이 아니라 **3-key mapping 자체를 tuple 로
+  감싸서** 돌려줍니다. 두 dict 의 value 가 무엇인지(둘 다 DataFrame 세트인지, 한쪽은
+  metadata 그림자인지)는 message 가 key 만 보여 주어 아직 모릅니다 — 위 확인
+  command 를 실행해 이 절을 갱신하십시오. adapter 는 이제 candidate dict 의 세
+  value 가 각각 자기 key 의 table 로 **컬럼 검증**될 때 그 mapping 을 채택합니다.
+  검증을 통과한 mapping 이 서로 다른 두 벌이면(예: OM/SEM 분리) 고르지 않고 두 벌의
+  내용을 담은 502 를 냅니다 — 이후 error message 는 dict 의 value 까지 서술하므로
+  다음 실패는 스스로 정체를 밝힙니다.
+
+wafer_mp_info
+-------------
+
+한 row 는 wafer 위의 measurement point 1개입니다. Recipe open 화면에서 chip 위치,
+측정 좌표, parameter 를 보여주는 데 사용합니다.
+
+Column -> Type: Value 설명
+
+ChipNo_X -> int64: wafer chip X index
+ChipNo_Y -> int64: wafer chip Y index
+Coordinate_X -> float64: chip 기준 X 좌표
+Coordinate_Y -> float64: chip 기준 Y 좌표
+P_No -> int64: point 번호
+D_No -> int64: d-number(detail point) 번호
+Diff -> str 이지만 API bool: differential 측정 여부 (`"0"` 확인 2026-08-11)
+Rel -> bool: relative move 적용 여부
+Rel_MoveX -> float64: relative move X offset
+Rel_MoveY -> float64: relative move Y offset
+Coordinate_X_r -> float64: relative move 적용 후 X 좌표
+Coordinate_Y_r -> float64: relative move 적용 후 Y 좌표
+Parameter -> string: parameter 이름
+img_meas2 -> int64: **P_No 와 같은 값** (user-confirmed 2026-07-27)
+
+★ img_meas2 주의 — 이름은 image 처럼 보이지만 **파일명이 아니라 P_No 와 같은
+  숫자**입니다. 2026-07-27 이전 문서는 이것을 "IMG_MEAS_0001.jpg" 같은 파일명으로
+  적어 두었고 mock 도 그렇게 만들고 있었습니다. 잘못된 기록이었습니다.
+  같은 이름의 컬럼이 idp_image_info 에도 있지만 그쪽은 실제 image 슬롯이므로,
+  **두 table 의 img_meas2 는 서로 다른 것**입니다.
+
+★★ dtype 은 위 표를 믿으면 안 됩니다 (office 확인 2026-08-05)
+
+  parser 가 숫자 컬럼을 **문자열로 돌려주는 경우가 실제로 있습니다.**
+  wafer_align_info 의 Coordinate.X 가 "52.676" 처럼 str 로 왔습니다. 세 table
+  모두 같은 위험이 있다고 보아야 하며, img_meas2 의 dtype 을 두고 오래 남아
+  있던 OFFICE-VERIFY 항목도 같은 성격의 질문이었습니다.
+
+  그래서 office adapter 의 `_records` 는 이제 contracts.py 가 선언한 타입으로
+  **변환**합니다(신뢰하지 않습니다). 변환 불가한 값은 None 이 되고 (table,
+  column) 당 warning 한 줄이 남습니다. bool 문자열은 임의로 추론하지
+  않지만, 파서가 쓰는 정확한 이진 sentinel `"0"` / `"1"` 만 False / True 로
+  변환합니다. `bool("False")` 가 True 라서 `"False"` 같은 단어는 여전히
+  비우고 warning 을 남깁니다.
+
+  OFFICE-CONFIRMED 2026-08-11: `wafer_mp_info.Diff` 의 원본 cell 이 문자열
+  `"0"`으로 왔습니다. API adapter 는 이 이진 sentinel 을 False 로 변환하고,
+  화면이 사용하는 bool contract 를 그대로 유지합니다. 대응하는 `"1"` -> True
+  변환도 지원하지만,
+  `"1"`이 실제 cell 에서 확인된 것은 아니므로 OFFICE-VERIFY 입니다. `Rel`의
+  실제 문자열 표현도 아직 OFFICE-VERIFY 입니다.
+
+  이 사고가 어떻게 드러났는지 기록해 둡니다. 응답은 200 이었고 백엔드는 아무
+  것도 로그하지 않았습니다. 브라우저에서 `.toFixed(3)` 가
+  "toFixed is not a function" 으로 터지면서 **align 표가 안 그려지고 동시에
+  모달의 닫기 버튼도 죽었습니다** — 렌더 중 예외는 빈 칸이 아니라 그 subtree
+  전체를 가져갑니다. mock 은 dtype map 으로 frame 을 만들기 때문에 이 계열의
+  버그를 절대 재현하지 못합니다.
+
+wafer_align_info
+----------------
+
+한 row 는 wafer align 에 사용되는 align point 1개입니다.
+
+Column -> Type: Value 설명
+
+Align_No -> int64: align point 순번
+Chip.X -> int64: align point 의 chip X index
+Chip.Y -> int64: align point 의 chip Y index
+Coordinate.X -> float64: align point X 좌표
+Coordinate.Y -> float64: align point Y 좌표
+P.No -> int64: align point 가 참조하는 point 번호
+
+★ 이 table 은 컬럼 이름에 **점(.)** 을 씁니다(`Chip.X`, `Coordinate.X`, `P.No`).
+  IDP 원본 표기이므로 underscore 로 통일하지 않습니다. Python/TS 양쪽에서 속성
+  접근이 아니라 key 접근(`row['P.No']`)이 되어야 합니다.
+
+idp_image_info
+--------------
+
+한 row 는 IDP 안에서 parameter 와 image 파일들이 연결된 image definition 1개입니다.
+
+Column -> Type: Value 설명
+
+Parameter -> string: parameter 이름
+img_add1 -> string: addressing image 1
+img_add2 -> string: addressing image 2
+img_meas1 -> string: measurement image 1
+img_meas2 -> string: measurement image 2
+SEQ -> int64: image definition 순번
+Last_SEQ -> int64: 연결된 마지막 sequence 번호
+Region -> int64: region 번호
+image_add3 -> string: addressing image 3
+Addressing -> bool: addressing 사용 여부 (office 확인 2026-07-28)
+Mother_Para -> bool: **이 row 의 parameter 자신이 mother 인지** (office 확인 2026-07-28)
+Double_Addressing -> bool: double addressing 사용 여부
+Meas_Counting -> int64: 해당 parameter 의 측정 반복 수
+dnumber_removed -> bool: 데이터 전송 제외 여부 (office 확인 2026-07-28)
+
+★ bool 3개 주의 (office 확인 2026-07-28) — Addressing, Mother_Para,
+  dnumber_removed 는 **진짜 bool dtype** 이며 cell 값은 True/False 입니다.
+  2026-07-28 이전 문서는 Addressing 을 "Yes"/"No" 문자열로, Mother_Para 를
+  parameter 이름 문자열로, dnumber_removed 를 int64 개수로 적어 두었고 mock 과
+  화면도 그렇게 만들어져 있었습니다. 셋 다 잘못된 기록이었습니다. 실제 파서를
+  돌려 보기 전까지 아무도 확인한 적이 없었기 때문이며, img_meas2 와 같은 종류의
+  사고가 이름이 아니라 **dtype** 을 통해 재현된 것입니다.
+
+★ Mother_Para 의 의미 (office 확인 2026-07-28) — 다른 parameter 를 가리키는
+  이름이 아닙니다. True 면 그 row 의 parameter 가 mother 이고, 보통 SEQ = 1 인
+  row 입니다. son parameter 들은 **mother 와 같은 image** 에서 자기 cd_value 를
+  얻습니다. 그래서 son 은 자기 image 를 따로 갖지 않아도 되고, img_* 슬롯이
+  parameter 수보다 적게 나올 수 있습니다.
+
+  ★★ son 을 mother 밑에 묶는 근거는 SEQ 가 아니라 **Region** 입니다
+     (user-confirmed 2026-08-18). 같은 Region 인 row 들이 한 SEQ 그룹이고 —
+     화면의 "1/8, 2/8, 3/8 …", 분모는 Last_SEQ — 그 안에서 Mother_Para 인 하나가
+     그 image 의 주인입니다.
+
+         Parameter   Mother_Para   Region
+         WAFER       True          1
+         CELL_SP     False         1
+         LWR         False         1
+
+     그래서 "보통 SEQ = 1" 이 불변식이냐는 물음은 묶기에는 필요하지 않습니다 —
+     Region 이 같은지만 보면 되고, 그 값은 mother 와 같은 row 에 있습니다.
+     device-statistics 가 이 묶음으로 son 에게 mother 의 cap 을 물려줍니다
+     (docs/datatables/hitachi/recipe_params.txt 의 "SEQ 그룹" 절).
+
+  ★ 소비처가 둘입니다 (2026-08-04) — recipe open 화면 말고도
+    **device-statistics 의 mother_normal 버킷**이 이 값을 필요로 합니다
+    (docs/datatables/hitachi/recipe_params.txt 의 mother 컬럼, planstep_r3.txt 의 네
+    버킷 절). 그런데 그쪽은 device 4000개 × recipe 100~200개 규모라, recipe
+    1건당 .idp 파일을 내려받는 이 경로를 쓸 수 없습니다.
+
+    ★★ 해결됨 (office 확인 2026-08-10) — 두 번째 출처가 있었습니다.
+       **cdsem_idp_ver 의 raw_data** object 에 같은 parameter 별 row 가 실려
+       있고 Mother_Para 도 거기 있습니다 (docs/datatables/hitachi/idp_ver.txt 의
+       "raw_data — mother 의 출처" 절). device-statistics 는 이제 그 경로로
+       읽으므로 .idp 파일을 recipe 마다 내려받지 않습니다.
+
+       2026-08-04 에 이 절은 "이 표의 Mother_Para 는 한 화면에서만 도달
+       가능하다" 고 적었습니다. 틀렸습니다 — index 쪽 blob 을 아무도 열어
+       보지 않았기 때문이고, 같은 종류의 사고가 이 문서에서 세 번째입니다
+       (img_meas2 는 이름을, bool 3개는 dtype 을, 이번은 **존재 여부**를
+       확인하지 않았습니다).
+
+       recipe open 화면은 계속 .idp 파일을 읽습니다. 그 화면은 recipe 1건만
+       보므로 파일이 더 정확하고, 두 경로가 어긋나면 파일이 정본입니다.
+
+★ Region = wafer_mp_info.P_No (office 확인 2026-07-28) — 두 table 을 잇는 정수
+  key 가 이미 존재합니다. 현재 화면은 Parameter 문자열로 잇고 있습니다(아래
+  "wafer_mp_info ↔ idp_image_info 연결 key" 절 참고).
+
+★ D_No = -1 ⟺ dnumber_removed = True (office 확인 2026-07-28) — 같은 사실을
+  wafer_mp_info 는 measurement point 단위로, idp_image_info 는 parameter 단위로
+  적어 둔 것입니다. dnumber_removed = True 는 **d-number 가 제거되어 legacy
+  시스템으로 아무것도 보내지 않는다**는 뜻이며, 개수가 아닙니다. 화면에서 이
+  값을 정상(초록)으로 칠하면 운영자에게 정반대를 알려 주게 되므로 pill 은
+  ok-when=false 로 그립니다.
+
+★ img_* 5개는 내부용입니다 (office 확인 2026-07-28) — img_add1, img_add2,
+  img_meas1, img_meas2, image_add3 는 raw recipe / AMP(auto measurement
+  parameter) 데이터를 꺼내기 위한 **key** 이지 화면에 그대로 보여줄 컬럼이
+  아닙니다. 그래서 recipe open 의 parameter table 은 이 5개를 빼고 나머지
+  8개만 보여줍니다.
+
+★ image 슬롯 컬럼 이름이 규칙적이지 않습니다 — `img_add1`, `img_add2` 다음이
+  `img_add3` 이 아니라 **`image_add3`** 이고, 목록 순서상으로도 img_meas2 뒤에
+  떨어져 있습니다. IDP 원본 표기이므로 그대로 씁니다.
+
+★ img_* 5개의 주인은 row 이며 Parameter 가 아닙니다 — 이 절 첫 문장대로 한 row
+  는 image definition 1개이고, **같은 Parameter 가 여러 row 에 나올 수 있으며 그
+  row 들이 서로 다른 파일을 가리킬 수 있습니다.** mock 은 slot 을 SEQ 로 만들기
+  때문에 Para_13 의 SEQ 4/6 은 IMMP0004…, SEQ 11/15 는 IMMP0011… 이 됩니다.
+
+  그래서 raw 파일을 캐싱하거나 join 하는 쪽의 key 는 (Parameter + slot 5개)
+  이어야 합니다. Parameter 만으로 키를 잡으면 두 row 가 한 칸에 겹치고, 화면은
+  **오류 없이** 다른 row 의 이미지와 설정을 보여줍니다. 실제로 2026-07-30 까지
+  recipe open 의 param-detail 캐시가 그랬습니다(RecipeOpenView 의 paramCache,
+  `paramDetailKey` 로 수정). ENMP 의 (section, key) 와 같은 종류의 사고가 이번에는
+  **row 단위**에서 재현된 것입니다.
+
+  OFFICE-VERIFY: "같은 Parameter 의 두 row 가 다른 파일을 가리킨다"는 것은 row 가
+  image definition 이라는 사실에서 따라오는 결론이고 mock 도 그렇게 만들지만,
+  사무실 데이터로 직접 확인한 적은 없습니다. son 이 mother 와 **같은 image** 를
+  쓴다는 Mother_Para 절과도 이어지는 질문입니다 — son 과 mother 는 서로 다른
+  parameter 이므로 위 결론과 충돌하지는 않습니다. 반대로 사무실에서 같은
+  Parameter 의 row 들이 항상 같은 slot 을 갖는다고 밝혀져도 위 key 는 그대로
+  옳습니다(같으면 같은 key 가 나와 캐시가 그대로 맞습니다).
+
+OFFICE-VERIFY: img_* 컬럼이 담는 문자열이 파일명 그대로인지, 조립이 필요한
+key 인지는 아직 눈으로 확인하지 않았습니다. {idp_name}/ raw recipe 폴더를 실제로
+내려받아 대조해야 답이 나옵니다. wafer_mp_info.img_meas2 가 이름과 달리 숫자였던
+전례가 있으므로 이름만 보고 파일명이라고 단정하지 않습니다.
+
+집에서의 대역 (home stand-in, 2026-07-27)
+=========================================
+
+`office_utils` 가 없으면 office adapter 는 집에서 import 조차 되지 않고, 파싱
+이후의 모든 매핑 판단이 사무실에 앉기 전까지 검증 불가능한 추측으로 남습니다.
+그래서 저장소 root 에 같은 이름의 **대역 package** 를 두었습니다.
+
+  위치    office_utils/read_idp_info.py
+  추적    **gitignore 됨**(`/office_utils/`). 절대 commit·push 하지 않습니다.
+
+push 하면 안 되는 이유는 단순한 위생 문제가 아닙니다. 추적되는 순간 사무실에서
+진짜 package 를 가려(shadow) 운영 화면이 **HTTP 200 을 유지한 채 조작된 recipe
+데이터**를 내려보내게 됩니다. `providers/office.py` 를 추적하지 않는 것과 같은
+규칙이며 이유도 같습니다.
+
+대역이 맞추는 것
+----------------
+
+  signature   `combined_idp_info(idp_file_path)` — 위치 인자 1개
+  반환        key 3개 dict, 각 value 는 pandas DataFrame
+  컬럼        이 문서의 이름·순서·dtype 그대로
+
+값은 그럴듯한 placeholder 이며 사무실 분포를 흉내 내지 않습니다. 파일 내용은 한
+byte 도 읽지 않습니다 — .idp format 은 집에서 알 수 없고, 파싱하는 척하는 편이
+파싱한 척하는 것보다 뒤끝이 깁니다. 같은 경로면 같은 값이 나오도록 경로 문자열로
+seed 를 만듭니다(compare 가 open 에서 파생되기 때문입니다).
+
+일부러 재현한 함정 (사무실에서만 터지는 것들)
+---------------------------------------------
+
+1. `wafer_align_info` 의 dot 컬럼(`Chip.X`, `P.No`) — 속성 접근이 아니라 key
+   접근이어야 한다는 것이 집에서 바로 드러납니다.
+2. `wafer_mp_info.img_meas2` 는 int(=P_No), `idp_image_info.img_meas2` 는
+   파일명 str. 같은 이름, 다른 의미.
+3. `image_add3` 의 이름 불규칙.
+4. 진짜 pandas dtype — `.to_dict()` 결과의 JSON 직렬화 가능 여부가 실제로
+   검증됩니다(numpy scalar 가 새어 나오면 사무실에서만 500 이 납니다).
+5. 경로가 없으면 `FileNotFoundError`. 진짜 파서는 파일을 읽으므로, adapter 는
+   FTP 다운로드를 실제 디스크에 내린 **뒤에** 호출해야 합니다. 집에서도 그
+   순서를 강제하기 위한 장치입니다.
+
+일부러 재현하지 않은 것
+-----------------------
+
+* NaN/결측값의 유무 — 진짜 파서가 내는지 모릅니다. 대역은 만들지 않되 adapter 는
+  견디도록 작성하고, 그 경로는 추적되는 contract test 로 덮습니다.
+* `Parameter` 가 두 table 사이에서 정확히 일치하는지 — 대역은 항상 일치시켜서
+  join 이 돌아가게 합니다. 사무실에서는 여전히 OFFICE-VERIFY 항목입니다.
+
+확인
+----
+
+  .venv/bin/python -c "from office_utils.read_idp_info import combined_idp_info"
+
+사무실에서는 진짜가, 집에서는 대역이 잡힙니다. 대역은 호출될 때마다 "HOME
+STAND-IN — 파싱하지 않았음" WARNING log 를 남기므로, 사무실 log 에 이 줄이
+보인다면 대역이 잘못 배포된 것입니다.
+
+사무실 소스가 없는 응답 항목
+============================
+
+`RecipeDetailResponse`(contracts.py)는 위 3개 table 말고도 두 가지를 더 내려보내고
+있는데, `combined_idp_info` 의 반환 key 에는 **없습니다**.
+
+  align_images -> wafer align 참조 image(Global Align / Fine Align 2장).
+                  IDP 파서가 돌려주지 않습니다. 장비 FTP 의 raw recipe 폴더
+                  ({idp_name}/) 안에 있을 가능성이 있어 확인이 필요합니다.
+  amp_info     -> Auto Meas Parameter (parameter × image slot 별 광학 조건).
+                  IDP 파서가 돌려주지 않습니다. parameter_info.txt 참고.
+
+둘 다 현재는 mock 이 만들어 내는 값이며, 사무실에서도 **fabricated** 입니다.
+지우지 않고 남겨 두는 이유는 화면이 이미 이 두 가지를 그리고 있기 때문이며,
+소스를 찾기 전까지는 "mock 임"을 이 문서가 계속 기록합니다.
+
+Mock 데이터 생성 규칙 (집/Phase 1)
+==================================
+
+1. recipe_id 는 Recipe 검색 화면에서 고른 recipe_name 을 그대로 넘깁니다.
+   fac_id 와 tool_category 는 현재 route context 입니다. 검색 목록이 Redis 의
+   recipe_name 문자열만 갖기 때문에, 별도 recipe_id 가 준비되기 전까지는
+   recipe_name 이 recipe open key 입니다.
+2. wafer_mp_info 기본 50 rows, wafer_align_info 기본 10 rows,
+   idp_image_info 기본 20 rows 를 생성합니다.
+3. wafer_mp_info.img_meas2 는 **같은 row 의 P_No 를 그대로 복사**합니다.
+   임의의 파일명을 만들지 않습니다.
+4. align_images 는 항상 Global Align, Fine Align 2개 record 입니다(소스 없음).
+5. 값의 범위는 화면이 깨지지 않을 정도의 그럴듯한 값이며, 사무실 실제 분포를
+   흉내 내지 않습니다. 실제 값을 알 수 없는 것을 아는 척하지 않습니다.
+6. 같은 recipe 를 다시 열면 같은 값이 나오도록 recipe_id/fac_id/tool_category 로
+   seed 를 만듭니다. 비교(compare) 화면이 열람(open) 결과에서 파생되기 때문에,
+   호출마다 값이 흔들리면 비교가 의미를 잃습니다.
+7. 두 table 사이의 관계는 값이 아니라 **불변식**이므로 mock 도 지킵니다
+   (2026-07-31 반영). wafer_mp_info 의 row 는 idp_image_info 의 parameter 중
+   하나를 골라 만들며, 그 parameter 로부터 아래 두 컬럼이 결정됩니다.
+
+     P_No  = 고른 parameter 의 Region
+     D_No  = -1  (그 parameter 의 dnumber_removed 가 True 일 때)
+             그 외에는 1~100 의 임의값
+
+   2026-07-28 에 확인해 이 문서에 적어 두고도 mock 에는 반영하지 않았던
+   항목입니다. 그 사이 집에서는 Region 으로 join 하면 **다른 parameter 의 row**
+   가 나왔고, D_No 는 randint(1, 100) 이라 **-1 이 한 번도 나오지 않았습니다** —
+   화면이 경고로 칠하는 바로 그 경우가 집에는 존재하지 않았습니다.
+8. Region 과 dnumber_removed 는 **parameter 단위**이므로, 같은 Parameter 를 갖는
+   idp_image_info row 들은 이 두 값이 서로 같아야 합니다. img_* slot 5개는 반대로
+   **row 단위**이며 서로 달라야 합니다(위 idp_image_info 절의 함정). 7번을
+   맞추면서 이 구분을 무너뜨리면 2026-07-30 의 param-detail 캐시 사고가 집에서
+   재현되지 않게 됩니다.
+
+   집의 대역 `office_utils/read_idp_info.py` 도 같은 규칙을 따릅니다. 두 곳이
+   어긋나면 office adapter 를 집에서 돌릴 때와 mock provider 를 쓸 때가 서로
+   다른 데이터를 보여 주게 됩니다.
+
+9. **열 수 없는 recipe 가 있습니다** (2026-08-18 추가). 사무실은 .idp 위치를
+   Redis registry(``v3_{cdsem,hvsem}_rcp_loc_{fab}``) 에서 찾고, 없으면 측정
+   이력에서 찾으며, 둘 다 없으면 ``LookupError`` 를 냅니다 — 목록(catalog)에만
+   있는 recipe 는 위치가 없습니다. mock 도 이제 같은 답을 낼 수 있어야 합니다.
+   그렇지 않으면 그 실패 경로를 쓰는 화면 코드가 집에서는 한 번도 실행되지 않고
+   사무실에서 처음 돌아갑니다.
+
+   - class 가 없는 이름(``/`` 없음)은 **절대** 열리지 않습니다. 사무실은
+     full_name 으로 키를 잡으므로 이것은 확인된 동작입니다(추정 아님).
+   - 형식이 맞는 이름 중 약 5개에 1개는 위치가 없습니다. **이 비율은
+     OFFICE-VERIFY 입니다** — 실제 비율은 모르며, 0 이 아니라는 것만 압니다.
+   - 판정은 (recipe, fab, tool_category) seed 로 고정입니다. 무작위로 실패하는
+     mock 은 시험할 수 없습니다.
+
+   구현: ``recipe_search/providers/mock.py`` 의 ``_is_locatable``.
+
+화면 사용 기준
+==============
+
+Recipe open key: recipe_name, fac_id, tool_category
+wafer map 표시: wafer_mp_info 의 ChipNo_X, ChipNo_Y, P_No, D_No
+좌표 표시: Coordinate_X, Coordinate_Y, Coordinate_X_r, Coordinate_Y_r,
+           Coordinate.X, Coordinate.Y
+align 표시: wafer_align_info 의 Align_No, Chip.X, Chip.Y, P.No
+parameter 표시: Parameter, SEQ, Last_SEQ, Region, Addressing, Mother_Para,
+                Double_Addressing, Meas_Counting, dnumber_removed
+                (img_* 5개는 내부 key 이므로 제외 — idp_image_info 절 참고)
+
+wafer_mp_info ↔ idp_image_info 연결 key
+=======================================
+
+**Parameter 문자열**로 잇습니다. 화면(RecipeOpenView.vue)이 이미 그렇게 동작합니다 —
+idp_image_info 에서 고른 row 의 Parameter 와 같은 값을 가진 wafer_mp_info row 만
+걸러 MP table 에 보여줍니다.
+
+대안인 "wafer_mp_info.P_No ↔ idp_image_info.Region" 은 2026-07-28 에 **같은
+값임이 확인되었습니다**(office 확인). 2026-07-28 이전에는 "같은 의미로 보이지만
+Parameter 로 이미 연결되는 이상 숫자 key 를 추가로 신뢰할 이유가 없다"는 이유로
+쓰지 않기로 했었고, 그 판단의 전제(확인되지 않은 추측)가 사라진 셈입니다.
+
+아직 바꾸지 않았습니다. 정수 join 은 공백·대소문자로 어긋나지 않는다는 장점이
+있지만, 표본 recipe 1건이 아니라 모든 row 에서 Region↔P_No 가 성립하는지 먼저
+확인해야 하고, 바꿀지 둘 다로 이을지는 결정 사항입니다.
+
+OFFICE-VERIFY: 실제 파싱 결과에서 Parameter 값이 두 table 사이에 정확히 일치하는지
+(공백·대소문자 차이가 없는지) 확인합니다. 어긋나면 MP table 이 조용히 비어 보입니다.
+office adapter 는 이 경우를 이미 warning 으로 남기지만, 화면은 빈 table 로만 보입니다.
+
+MP table 표시 컬럼
+
+  화면은 Parameter 와 img_meas2 를 뺀 12개 컬럼을 보여줍니다. Parameter 를 빼는
+  이유는 이미 그 값으로 필터링된 결과이기 때문입니다.
+
+  img_meas2 는 P_No 와 값이 같아서 뺐습니다 (user-confirmed 2026-08-05). 같은
+  숫자가 다른 이름으로 두 번 나오면 두 개의 사실처럼 읽힙니다. 응답에는 그대로
+  들어 있으므로 raw data 가 필요하면 API 로 볼 수 있습니다.
+  idp_image_info 의 img_meas2 는 8자 slot key 라 별개이며 계속 표시됩니다.
+
+
+raw recipe folder — AMP / focus / beam condition (user-confirmed 2026-07-29)
+===========================================================================
+
+.idp 파일 **옆 폴더**에 parameter 설정 원본 파일들이 있습니다. 이 폴더가
+amp_info / align_images 의 실제 출처이며, 2026-07-29 이전에는 출처를 몰라
+사무실에서도 값을 지어내고 있었습니다.
+
+  /HITACHI/DEVICE/HD/{class_name}/data/{idw}/{idp}/
+
+읽는 주체는 두 번째 사내 parser 입니다(office 전용, gitignore). 함수는 5개이며,
+어느 파일을 어느 함수에 넣는지가 계약입니다(user-confirmed 2026-07-29).
+
+  | 함수 | 대상 파일 | 인자 |
+  | --- | --- | --- |
+  | read_amp_info | img_meas2 (PRMS0000) | source |
+  | read_af_pr_condition | img_add2 의 EN… (ENMP0000) | source |
+  | read_meas_image_condition | 측정·addressing 이미지의 cond.txt | source |
+  | get_align_beam_pr_conditions | align 의 ENAP{p:04d} **여러 개** | list[source] |
+  | read_align_image_condition | align 이미지의 cond.txt | source, which |
+
+다섯 함수 모두 **경로 · bytes · 문자열**을 다 받습니다(get_align_beam_pr_conditions
+는 그 셋 중 하나를 담은 list). .idp 자체를 읽는 read_idp_info.combined_idp_info
+도 마찬가지로 셋 다 받습니다(user-confirmed 2026-08-05). 그래서 recipe_search 는
+Flask host 에 파일을 한 byte 도 쓰지 않고 동작합니다.
+
+  2026-08-05 이전 문서는 combined_idp_info 가 경로만 받는다고 적었고, adapter 는
+  그 때문에 .idp 를 temp file 로 내려놓고 있었습니다. 둘 다 사실이 아니었습니다.
+  화면에 보이는 증상이 없는 종류의 오해라 오래 남았습니다 — 잘못된 제약은
+  기능을 깨뜨리지 않고 불필요한 disk write 만 남깁니다.
+
+align 전용 함수 2개 주의
+------------------------
+
+align point 의 파일은 **일반 parameter 와 다른 함수**로 읽습니다. 이름이 비슷해서
+바꿔 쓰기 쉽지만, 2026-07-29 이전 adapter 는 실제로 바꿔 쓰고 있었습니다
+(ENAP 를 read_af_pr_condition 에, align cond.txt 를 read_meas_image_condition 에).
+
+  ENAP{p:04d}              -> get_align_beam_pr_conditions([...])  (read_af_pr_condition 아님)
+  .IMAP{p:04d}.jpeg/cond.txt -> read_align_image_condition(source, which)
+                                                     (read_meas_image_condition 아님)
+
+get_align_beam_pr_conditions 는 파일 하나가 아니라 **align point 전체의 ENAP
+목록**을 한 번에 받습니다. 그래서 호출도 point 당 1회가 아니라 recipe 당 1회입니다.
+
+이 함수의 **반환 구조**는 2026-07-30 에 확인되었습니다: `{"OM": ..., "SEM": ...}`
+이며 point 별로 나눌 수 있습니다. 아래 "ENAP… — align beam/PR 은 optic 으로
+나뉩니다" 절을 참고하십시오. (2026-07-30 이전에는 이 자리에 "반환 구조를 모른다"
+는 OFFICE-VERIFY 가 있었고, adapter 는 나눌 수 없는 경우 전체를 모든 point 에
+같은 block 으로 붙이도록 되어 있었습니다. 그 폴백은 지우지 않고 남겨 두었습니다.)
+
+which 인자 (user-confirmed 2026-07-29)
+--------------------------------------
+
+read_align_image_condition 의 두 번째 인자는 **"OM" 또는 "SEM"** 이며, 그 align
+이미지를 찍은 광학계를 뜻합니다. 값은 P.No 로 정해집니다.
+
+  P.No = 1  ->  "OM"   (optical microscope)
+  P.No = 2  ->  "SEM"
+
+align point 는 보통 1 과 2 **두 개**이고, 1 하나만 있는 recipe 도 있습니다.
+
+OFFICE-VERIFY: P.No 가 3 이상인 recipe 가 있는지, 있다면 which 가 무엇인지는
+모릅니다. adapter 는 추측하지 않고 그 point 의 이미지 조건을 "파일 없음" 으로 두고
+WARNING 을 남깁니다 — 둘 중 하나를 찍으면 화면이 반대쪽 광학계의 조건을 정상인
+것처럼 보여 주게 되기 때문입니다.
+
+align 이미지도 폴더 listing 으로 찾습니다 (2026-08-22 변경)
+-----------------------------------------------------------
+
+HV-SEM 은 **측정** 이미지 슬롯 하나를 targeting sub-position 별로 여러
+파일(`-U`/`-T`/`-M`/`-L`)로 쪼갭니다(2026-08-08 확인). align 이미지는 그렇지
+않다고 보고되었습니다 — CD-SEM 과 똑같이 `IMAP{p:04d}.jpeg` 한 장입니다
+(user-confirmed 2026-08-21).
+
+2026-08-22 이전에는 이 사실을 근거로 align 기준 이미지 이름을 **파일 목록 조회
+없이 계산**했습니다. `rawfiles.align_reference_images()` 가 ALIGN_OPTICS 를 그대로
+돌려주었으므로 응답은 언제나 `IMAP0001.jpeg` 와 `IMAP0002.jpeg` 두 장이었습니다.
+
+**이 계산이 production 에서 404 를 만들었습니다.** align point 가 1 하나뿐인
+recipe 는 IMAP0002.jpeg 를 가지고 있지 않은데, 화면은 그 이름을 받아 `<img>` 를
+띄우고 `recipe-image` 는 404 로 답할 수밖에 없습니다. 이 feature 의 다른 읽기
+경로는 없는 파일을 결과에서 빼고 200 으로 답하지만(아래 "없는 파일은 오류가
+아닙니다"), `recipe-image` 는 **파일 하나당 GET 하나**라서 뺄 자리가 없습니다.
+
+그래서 지금은 `rawfiles.align_reference_images(listing)` 이 폴더 listing 을
+**필수 인자로** 받아 실제로 있는 IMAP 파일만 돌려줍니다. 이름 계산으로 되돌아가는
+폴백은 없습니다.
+
+  * 있는 point 만 나옵니다. OM 하나뿐인 recipe 는 1장으로 답합니다.
+  * suffix 확장(`IMAP0001-U.jpeg` 등)이 실제로 존재한다면 그대로 찾아냅니다.
+    즉 아래 OFFICE-VERIFY 가 어느 쪽으로 판명되든 화면은 옳게 그려집니다.
+  * P.No 가 3 이상인 파일도 찾아내되 optic 은 빈 문자열로 둡니다 — 어느 광학계인지
+    모르는 채로 "SEM" 을 찍으면 반대쪽 조건이 정상처럼 보이기 때문입니다.
+  * listing 자체를 못 하면 **빈 목록이 아니라 503(SourceUnavailable)** 입니다.
+    "장비가 답을 안 했다" 와 "이 recipe 는 align 이미지가 없다" 는 ALIGNMENT FAIL
+    화면에서 전혀 다른 이야기이며, 앞의 것을 뒤의 것으로 보고하면 엔지니어가
+    있지도 않은 recipe 결함을 찾게 됩니다.
+
+대가는 왕복 1회입니다. `get_align_images` 는 이제 resolution 만 하지 않고 NLST 를
+한 번 겁니다. live-alarm 보드의 응답성은 그대로입니다 — 이 경로는 알람을 열어야
+비로소 실행되고, 어차피 바로 뒤의 이미지 fetch 가 같은 장비를 열 예정이었습니다.
+장비가 죽어 있을 때의 체감 시간도 같습니다: 예전에는 endpoint 가 즉시 답하고
+`<img>` 두 개가 나란히 connect timeout 을 쓴 뒤 깨진 썸네일이 되었고, 지금은
+listing 이 그 timeout 을 쓰고 503 을 말합니다.
+
+이름 규칙
+---------
+
+idp_image_info 의 img_* 값은 모두 **8자, 확장자 없음**, {kind}{stage}{NNNN} 형태입니다.
+
+  | 컬럼 | 예시 | 이미지 | 설정 / 조건 파일 |
+  | --- | --- | --- | --- |
+  | img_add1 | IMMP0001 | IMMP0001.jpeg | .IMMP0001.jpeg/cond.txt |
+  | img_add2 | PRMP0000 | 없음 | ENMP0000 |
+  | image_add3 | I2MP0000 | I2MP0000.jpeg | .I2MP0000.jpeg/cond.txt |
+  | img_meas1 | IMMS0000 | IMMS0000.jpeg | .IMMS0000.jpeg/cond.txt |
+  | img_meas2 | PRMS0000 | 없음 | PRMS0000 |
+  | P.No = p | — | IMAP{p:04d}.jpeg | .IMAP{p:04d}.jpeg/cond.txt · ENAP{p:04d} |
+
+  kind  IM · I2 = 이미지, PR = 장비가 쓴 설정 key, EN = 그 key 가 가리키는 조건 파일
+  stage MP = addressing, MS = measurement, AP = wafer align
+
+규칙 7가지
+----------
+
+1. **"non" 은 빈 slot 을 뜻합니다.** 프랑스어 non 이며 "none" 의 오타가 아닙니다.
+   "none" 은 sentinel 이 **아니고** 평범한 값으로 취급합니다. 값이 "non" 인
+   slot 은 FTP 요청 자체를 만들지 않습니다.
+2. **조건 파일은 `.` 로 시작하는 숨김 디렉터리 안에 있습니다.** IMMP0001.jpeg 는
+   파일이고 .IMMP0001.jpeg/ 는 그 옆의 디렉터리입니다. msr_image 가 2026-07-24 에
+   이미 확인한 것과 같은 구조라서 msr_image/paths.py 의 cond_path() 를 그대로
+   재사용합니다(backend/ebeam/recipe_search/rawfiles.py).
+3. **img_add2 는 앞 두 글자 PR 을 EN 으로 바꿔** AF/PR 조건 파일 이름이 됩니다.
+   앞 두 글자는 항상 PR 입니다.
+4. **img_meas2 는 그대로 씁니다.** PRMS0000 자체가 AMP 파일 이름이며 EN 으로
+   바꾸지 않습니다.
+5. **EN… · PR… 설정 파일에는 확장자가 없습니다.** 확장자(.jpeg)는 이미지에만 붙습니다.
+6. **번호는 4자리 zero padding 입니다.** ENAP{p:04d} 이므로 P.No = 1 은 ENAP0001
+   입니다. "ENAP000" + str(p) 로 이어 붙이면 p = 10 에서 9자리가 되어 깨집니다.
+7. **img_add2 와 img_meas2 는 이미지가 없습니다.** 이미지를 가리키는 컬럼은
+   img_add1 · image_add3 · img_meas1 셋뿐입니다. image_add3 는 img_* 이름 규칙에서
+   벗어나지만 이미지가 맞습니다.
+
+HV-SEM — slot 하나가 파일 여러 개입니다 (user-confirmed 2026-08-08)
+------------------------------------------------------------------
+
+위 이름 표와 규칙 7가지는 **CD-SEM 의 모양**입니다. HV-SEM 은 targeting
+measurement point 에 따라 **측정 이미지(img_meas1)** 하나를 여러 장으로 찍고,
+공유 stem 뒤에 `-U` / `-T` / `-M` / `-L` suffix 를 붙입니다
+(예: IMMS0001-U.jpeg). addressing 은 다릅니다 — 최대 2장이고 그 2장이 곧
+img_add1 · image_add3 두 slot 이므로, slot 당 1장이며 suffix 확장은 없다고
+보면 됩니다 (user-confirmed 2026-08-08; mock 도 img_meas1 만 확장합니다).
+그래서
+
+1. slot 값(stem)에서 파일명을 **산술로 만들 수 없습니다.** 어떤 suffix 가
+   실제로 존재하는지는 raw 폴더를 **listing** 해야만 압니다.
+   `rawfiles.slot_sources` 가 listing 을 받아 stem 일치(`stem` 정확히, 또는
+   `stem-` 로 시작) 파일 전부로 확장하고, listing 이 없거나 실패하면 기존
+   파생 이름({stem}.jpeg)으로 폴백합니다 — CD-SEM 은 그 폴백이 그대로
+   정답이므로 동작이 변하지 않습니다. office adapter 는 param-detail 계획
+   전에 `_list_raw_dirs` 로 fleet listing 1회를 수행합니다.
+2. cond sidecar 는 slot 이 아니라 **파일 단위**입니다:
+   .IMMS0001-U.jpeg/cond.txt. 따라서 ParamImage 의 slot 은 응답 안에서
+   유일 key 가 아니며, 소비처는 (slot, name) 으로 식별해야 합니다.
+3. suffix 집합이 U/T/M/L 4개로 닫혀 있다는 확인은 없습니다. 매칭은 열려
+   있고(`stem-` 뒤 무엇이든 suffix 로 봅니다), 알려진 4개는 보고된
+   순서(U, T, M, L)로 화면 정렬에만 쓰입니다. 각 글자의 의미도 아직
+   모릅니다 — OFFICE-VERIFY.
+4. 확장자도 .jpeg 확정이 아닙니다. msr 결과 이미지처럼 .tif 만 존재하는
+   파일이 있을 수 있어 매칭은 .jpeg/.jpg/.tif/.tiff 4종을 다 받습니다.
+   OFFICE-VERIFY: recipe raw 폴더에서 실제 관측된 확장자는 아직 .jpeg 뿐이라,
+   mock 의 recipe listing 은 .jpeg 만 만듭니다.
+
+wafer align 이미지(IMAP…)에 같은 suffix 확장이 있는지는 확인되지 않았습니다 —
+OFFICE-VERIFY. 다만 2026-08-22 부터 adapter 는 align 쪽도 폴더 listing 으로
+찾으므로(위 "align 이미지도 폴더 listing 으로 찾습니다"), 확장이 있든 없든
+실제 파일을 그대로 집어 옵니다.
+
+wafer align
+-----------
+
+wafer_align_info 의 "P.No" 에서 **중복을 제거하고 정렬한** 값들이 align point 입니다.
+같은 P.No 가 여러 row 에 나오지만 파일 한 벌은 P.No 하나당 하나입니다.
+
+값은 보통 **1 과 2** 이며, 1 = OM · 2 = SEM 입니다(위 "which 인자" 절). 1 하나만
+있는 recipe 도 있습니다. 즉 align point 는 "wafer 위의 서로 다른 위치" 가 아니라
+**같은 정렬 동작을 두 광학계로 나눠 놓은 것**에 가깝습니다.
+
+없는 파일은 오류가 아닙니다
+---------------------------
+
+parameter 가 세 번째 addressing 이미지나 AF/PR 설정을 안 가지는 경우는 흔합니다.
+adapter 는 없는 파일을 로그만 남기고 결과에서 빼며, 화면은 "파일 없음" 으로
+보여줍니다(HTTP 200).
+
+★ `recipe-image` 만 이 규칙을 지킬 수 없습니다. 파일 하나당 GET 하나이므로 뺄
+  자리가 없고, 없는 파일은 404 가 됩니다. 따라서 **이름을 화면에 내려보내는
+  쪽이 그 파일이 있는지 먼저 확인해야 합니다** — 확인하지 않은 이름은 그대로
+  브라우저 콘솔의 404 가 됩니다. 2026-08-22 의 align 이미지 건이 바로 이것이며,
+  이름을 계산하는 코드를 새로 쓸 때마다 되풀이될 수 있는 실수입니다.
+
+장비 자체에 접속하지 못한 경우는 다릅니다. ftp_handler 의 HostFailure 는
+파일 단위 실패가 아닐 때(connect / login / listing) remote_path 가 None 이며,
+이때만 SourceUnavailable(HTTP 503)을 냅니다. "요청한 파일이 하나도 안 왔다"를
+기준으로 삼으면 안 됩니다 — 어떤 parameter 는 존재하지 않는 cond.txt 하나만
+요청할 수 있고, 그러면 멀쩡한 장비가 죽은 것으로 보고됩니다.
+
+503 을 쓰는 이유는 msr_image 가 이미 같은 상황에 SourceUnavailable(503)을
+쓰고 있기 때문입니다. 2026-07-29 설계 문서에는 502 라고 적혀 있었지만, 같은
+tool-FTP 표면에서 코드를 새로 만드는 것보다 재사용이 낫다고 판단했습니다.
+
+cond.txt 의 field 이름 (office 확인 2026-07-30)
+==============================================
+
+`scripts/probes/probe_recipe_ftp.py` 를 사무실에서 실제로 돌려 확인했습니다. 측정·addressing
+이미지의 cond.txt(`read_meas_image_condition`)와 wafer align 이미지의
+cond.txt(`read_align_image_condition`)는 **어휘가 하나**이며, 어느 key 가 들어
+있느냐만 다릅니다. 이 두 파일은 **모든 값이 str** 입니다 (ENMP 은 다릅니다 —
+아래 ENMP 절 참고).
+
+  | key | 예시 | SEM | OM |
+  | --- | --- | --- | --- |
+  | Accelerating_voltage | `'500 V'` | O | — |
+  | Probe_current | `'8.0 pA'` | O | — |
+  | Magnification | `'30000'` (OM 은 `'104'`) | O | O |
+  | Number_of_frames | `'32'` | O | — |
+  | Image_rotation | `'0.0 deg'` | O | — |
+  | Chip_coordinate | `'9737 um, 14710 um'` (OM 표본은 `'0 um, 0 um'`) | O | O |
+  | Wafer_coordinate | `'172792 um, 175176 um'` | O | O |
+  | Field_Size | `'4.499 um, 4.499 um'` (OM 은 **값 없음**) | O | O |
+  | Optics | `'High Reso.'` | O | — |
+  | Scan | `'TV'` | O | — |
+  | Pixel | `'512,512'` | O | O |
+  | Filter | `'OFF'` | O | — |
+
+측정·addressing 이미지(.IMMP / .I2MP / .IMMS)는 항상 SEM 12개입니다. align 은
+P.No 로 갈립니다 — P.No 1(OM)은 위 5개, P.No 2(SEM)는 측정 쪽과 **똑같은 12개**
+입니다.
+
+숫자로 읽으면 안 되는 이유 4가지
+--------------------------------
+
+1. **단위가 값 안에 있습니다.** `'500 V'`, `'0.0 deg'`, `'8.0 pA'`. float() 로
+   바로 넘길 수 없습니다.
+2. **단위가 아예 없는데도 str 입니다.** `Magnification`, `Number_of_frames`,
+   `Pixel` 은 `'30000'` 이지 `30000` 이 아닙니다.
+3. **X,Y 를 문자열 하나에 담는 key 가 4개이고 구분자가 서로 다릅니다.**
+   `Chip_coordinate` · `Wafer_coordinate` · `Field_Size` 는 `', '` 이고
+   `Pixel` 은 공백 없는 `','` 입니다. 화면은 이것을 **그대로** 보여 줍니다.
+   보기 좋게 다듬으면 장비가 실제로 뭐라고 썼는지가 가려집니다.
+4. **OM 은 다른 어휘가 아니라 부분집합입니다.** 광학 현미경에는 beam 이 없으니
+   beam 설정 key 가 통째로 없습니다. 없는 key 를 빈 값으로 채우면 안 됩니다.
+
+Magnification ↔ Field_Size 는 한 설정입니다
+-------------------------------------------
+
+SEM 표본이 30000x → `'4.499 um'` 이었고, 4.499 × 30000 = **134,970** 입니다.
+mock 은 이 곱을 유지해 magnification 과 모순되는 field size 를 만들지 않습니다
+(`_FOV_MAG_PRODUCT`).
+
+**OM 에는 적용하지 않습니다.** OM 의 `Field_Size` 는 key 는 있고 **값이
+없습니다**(user-confirmed 2026-07-30). mock 은 빈 문자열을 내보내고 화면은
+`—` 로 그립니다. 2026-07-30 이전에는 SEM 상수로 OM 값을 계산해
+`'1297.788 um'` 을 마치 읽어 온 값처럼 찍고 있었습니다 — 아무도 관찰한 적 없는
+**광학계 간 관계를 지어낸 것**이었습니다.
+
+OFFICE-VERIFY — **판단 보류** (2026-07-30 현재 확인 불가). 상수는 SEM 표본
+**1건**에서 나왔고, 곱이 유지되는지는 "아직 안 봤다" 가 아니라 **답을 못 얻은**
+상태입니다. 그래도 유지하는 이유는, 둘을 따로 뽑으면 이번에는 "둘은 무관하다" 를
+주장하게 되기 때문입니다 — 똑같이 미확인이면서 결과는 더 나쁩니다(자기 magnification
+과 모순되는 field size 를 화면에 찍습니다). 이것은 **mock 내부 일관성**을 위한
+선택이지 사무실 규칙이 아니며, office adapter 는 이 상수를 알지도 쓰지도 않습니다.
+
+OM 의 값은 **recipe 마다 달라집니다** (user-confirmed 2026-07-30). 그래서 mock 은
+`Magnification = '104'` 와 `Chip_coordinate = '0 um, 0 um'` 을 상수로 찍지 않고
+표본을 포함한 범위에서 뽑습니다. 2026-07-30 이전에는 "광학 현미경 배율은 렌즈로
+고정" 이라고 추론해 매번 104 만 내보냈고, 이는 존재하지 않는 상수를 가르치고
+있었습니다.
+
+`Optics` · `Scan` · `Filter` 는 여전히 확인된 한 값만 내보냅니다 — 이쪽은 변한다는
+확인이 없기 때문입니다.
+
+`!Cursor_info` — 장비가 그린 마크의 위치 (user-confirmed 2026-09-03)
+------------------------------------------------------------------
+
+위 12개 표는 2026-07-30 probe 가 reader 를 통해 본 key 들이고, `!` 로 시작하는
+key 는 하나도 없었습니다. 그런데 같은 cond.txt 원문에는 한 줄이 더 있습니다
+(auto_recipe_creator 의 align 작업에서 실데이터로 확인, `poc/workflow_3/align`):
+
+  | key | 예시 | 뜻 |
+  | --- | --- | --- |
+  | !Cursor_info | `0,0,0,0,2097,2561,1600,1600,3520,3520` | 십자선·white box 좌표 |
+
+  - 값은 콤마로 구분한 정수열입니다. 0-base 인덱스로 **[4],[5] 가 십자선 (cx, cy)**,
+    **[6..9] 가 white box (left, top, right, bottom)** 입니다. `-1` 은 "없음" —
+    [4],[5] 가 -1 이면 장비가 십자선을 그리지 않은 것이고, 실패한 align 이미지는
+    흔히 그렇습니다. [0..3] 의 뜻은 OFFICE-VERIFY 입니다.
+  - 좌표계는 이미지 px 가 **아닙니다**. `Pixel` 의 **10배 oversample 프레임**입니다.
+    `Pixel 512,512` 이면 프레임은 5120x5120 이고 `2097,2561` 은 512-px 이미지 위의
+    `(209.7, 256.1)` 입니다. 1024-px 이미지에서 배율이 그대로 10인지는 OFFICE-VERIFY.
+  - key 이름이 장비마다 `!Cursor_inf` / `!Cursor_info` 로 흔들립니다. 파서는
+    `cursor_inf` **접두 매칭**을 합니다 (`backend/_core/cond_cursor.py`).
+  - 십자선은 msr(측정) 이미지에 장비가 실제로 **그려 넣은** 선이고, white box 는
+    recipe 등록 이미지의 unique-area 좌표입니다. recipe-search/open 과 live-alarm 은
+    이 줄로 십자선과 white box 중심점을 **덧그리고**, box 가 있으면 **이미지 중심**도
+    같이 찍어 둘을 점선으로 잇습니다 — recipe 의 실제 정렬점은 이미지 중심이고 box
+    중심은 매칭 단서일 뿐이라, 그 둘의 차이(offset)가 auto_recipe_creator 가
+    클릭 지점에 더하는 값입니다(`docs/align_point_from_cond.md` 참조). skewvoir 는 저장된 측정
+    이미지를 변형하지 않습니다.
+
+  파싱은 서버가 한 번만 합니다. 이미지가 들어가는 응답(ParamImage · AlignPoint ·
+  AlignImage)마다 `marks` field 로 **이미지 대비 분수(0..1)** 를 실어 보내므로,
+  화면은 Pixel 도 x10 도 모른 채 덧그립니다. reader 가 `!` key 를 돌려주는지는
+  확인되지 않았으므로(OFFICE-VERIFY) office adapter 는 reader 의 row 가 아니라
+  **원문 바이트**에서 `marks` 를 뽑습니다(`_image_marks`). mock 은 두 optic 모두
+  마지막 row 로 내보내며, 실제 파일 안의 위치는 기록되지 않았습니다. 측정·addressing
+  이미지(.IMMP / .IMMS)의 cond.txt 에도 이 줄이 있는지는 OFFICE-VERIFY — 없으면
+  `marks` 가 null 이고 화면은 토글을 숨깁니다.
+
+PRMS… — AMP 파일의 field 이름 (office 확인 2026-07-30)
+=====================================================
+
+`read_amp_info` 가 돌려주는 18개 field 입니다. cond.txt 가 **이미지를 어떻게
+찍었는지**를 적는다면, 이 파일은 **그 이미지에서 parameter 를 어떻게 재는지**를
+적습니다. 값은 전부 str 입니다 (ENMP 과 다른 점입니다).
+
+  | key | 예시 |
+  | --- | --- |
+  | Measurement | `'Width'` |
+  | Object | `'Space'` |
+  | Kind | `'Multi_Point'` |
+  | Measurement_Point | `'32'` |
+  | Data | `'Mean'` |
+  | Method | `'Linear'` |
+  | Design_Value | `'266.1'` |
+  | Search_Area | (값 미확인) |
+  | Inspect_Area | (값 미확인) |
+  | Smoothing | (값 미확인) |
+  | Differential | (값 미확인) |
+  | Threshold | `'50, 50'` |
+  | Edge_Search_Direct. | `'Normal, Normal'` |
+  | Edge_Number | `'1, 1'` |
+  | Base_Line_Start_Point | `'2, 2'` |
+  | Base_Line_Area | `'8, 8'` |
+  | Sum_Line_Point | (값 미확인) |
+  | Target | (값 미확인) |
+
+cond.txt 와 다른 점 2가지
+-------------------------
+
+1. **단위가 아예 없습니다.** `Design_Value` 는 `'266.1'` 이지 `'266.1 nm'` 이
+   아닙니다. 즉 "값이 단위를 품고 있는가" 는 **파일마다 다르며** 이 pipeline 의
+   성질이 아닙니다. 어느 쪽도 가정하면 안 됩니다.
+2. **`', '` 로 이어 붙인 쌍(pair)이 5개입니다.** `Threshold`,
+   `Edge_Search_Direct.`, `Edge_Number`, `Base_Line_Start_Point`,
+   `Base_Line_Area`. width 측정은 edge 가 둘이고 각 edge 가 자기 설정을 갖기
+   때문입니다. 구분자는 좌표와 같은 `', '` 이고, 처리 방식도 같습니다 — 그대로
+   보여 줍니다.
+
+★ `Edge_Search_Direct.` 는 정말 마침표로 끝납니다 (user-confirmed 2026-07-30)
+
+  "Direction" 이 잘린 장비 쪽 표기이며 **고치지 않습니다**. contract key 를
+  조용히 바로잡으면 집과 사무실이 key 이름을 두고 어긋나게 됩니다 — 이 문서가
+  막으려는 사고가 바로 그것입니다.
+
+  같은 날 `Base_Line_Start_Pint` 는 **우리 쪽 전달 오타**로 확인되어
+  `Base_Line_Start_Point` 로 고쳤습니다. 둘을 구분하는 것이 요점입니다:
+  장비 오타는 남기고, 우리 오타는 고칩니다.
+
+★ 값을 모르는 key 6개는 **가짜처럼 보이게** 둡니다
+
+  `Search_Area`, `Inspect_Area`, `Smoothing`, `Differential`, `Sum_Line_Point`,
+  `Target` 은 key 만 확인되고 값 형식은 확인되지 않았습니다. mock 은 이 6개에
+  `'A3F1'` 같은 **누가 봐도 합성인 hex** 를 넣습니다. 그럴듯한 값을 지어내면
+  key 층에서 저질렀던 AmpRow 의 실수를 값 층에서 되풀이하는 셈이기 때문입니다.
+  실제 값이 하나라도 들어오면 그때 채웁니다.
+
+ENMP… — AF/PR 파일은 **중첩 dict** 입니다 (office 확인 2026-07-30)
+==================================================================
+
+`read_af_pr_condition` 만 유일하게 **dict 안에 dict** 를 돌려줍니다. 나머지 넷은
+평평한 key/value 입니다. group 은 8개입니다.
+
+group 과 그 안의 key 는 아래와 같습니다 (사무실 key 순서 그대로).
+
+  | group | 언제 있는가 | key |
+  | --- | --- | --- |
+  | sequence_addressing | addressing 1회 이상 | Pre Dose · Auto Focus1 · Pattern Recognition1 · Pattern Recognition2 · Auto Focus2 |
+  | sequence_measurement | 항상 | Focusing · Pattern Recognition · Measurement Execution · Image Save |
+  | measurement_pattern_recognition | 항상 | Acceptance · Wait(s) · ABC · Centering · Relative Position(um) · Offset(um) · Contrast Mode |
+  | measurement_focusing | 항상 | Wait(s) · Offset(LSB) · Method · Relative Position X(um) · Relative Position Y(um) · Mag |
+  | addressing_auto_focus1 | addressing 1회 이상 | Method · Offset(LSB) · Wait(s) · Relative Position X(um) · Relative Position Y(um) · Mag · Threshold · Charging Voltage |
+  | addressing_pattern_recognition1 | addressing 1회 이상 | Acceptance · Wait(s) · ABC |
+  | addressing_auto_focus2 | addressing 2회 | 1과 동일 |
+  | addressing_pattern_recognition2 | addressing 2회 | 1과 동일 |
+
+측정은 **기본 sequence(addressing → measurement)** 로 돌아가고, measurement
+직전의 addressing 은 parameter 에 따라 **none / once / twice** 로 선택됩니다.
+none 이면 addressing 관련 group 이 파싱 결과에 **아예 없습니다**
+(user-confirmed 2026-07-30). `sequence_addressing` 도 마찬가지로 사라집니다.
+
+`sequence_*` 두 group 은 설정이 아니라 **sequence 의 단계 이름**을 나열합니다.
+그 아래 group 들이 각 단계의 실제 설정을 담습니다.
+
+★ 단위를 **key 이름**에 답니다 — 세 번째 규칙입니다
+
+  `Wait(s)`, `Offset(LSB)`, `Relative Position X(um)` 처럼 ENMP 는 단위를 key 에
+  씁니다. cond.txt 는 **값**에 쓰고(`'500 V'`), AMP 는 **아예 안 씁니다**
+  (`'266.1'`). 파일 3개가 규칙 3개이므로, 어느 쪽도 가정하면 안 됩니다.
+
+★ 이상해 보이는 철자는 **매번 되물어야 합니다**
+
+  2026-07-30 에 이상해 보이는 key 4개를 지목했고, 그중 **3개가 우리 쪽 전달
+  오타**였습니다 — `Base_Line_Start_Pint` → `Point`, `Pre does` → `Pre Dose`,
+  `Measurement Excution` → `Measurement Execution`. 장비 쪽 표기가 맞았던 것은
+  `Edge_Search_Direct.` **하나뿐**입니다.
+
+  처음의 본능은 4개를 다 "장비 오타이니 보존" 하는 것이었고, 그대로 갔다면
+  사무실이 보내지 않는 key 3개를 계약으로 굳힐 뻔했습니다. 비용이 한쪽으로만
+  큽니다 — 보존한 오타는 사무실이 절대 보내지 않는 key 이고, 화면은 오류 없이
+  그 줄만 조용히 비웁니다. 그래서 이상한 철자는 보존하기 전에 **질문 한 번**이
+  항상 남는 장사입니다.
+
+★ row 의 정체는 (section, key) 이지 key 가 아닙니다
+
+  `addressing_auto_focus1` 과 `addressing_auto_focus2` 는 **같은 종류의 설정을
+  두 번** 적은 것이므로 안쪽 key 이름이 **완전히 같습니다**. 게다가
+  `Acceptance` 는 ENMP group 3개에 나오고 **ENAP 에도** 나옵니다. key 만으로
+  dedup 하거나 join 하면 pass 2 가 pass 1 로 조용히 흡수되어, 두 heading 아래에
+  pass 1 의 값이 똑같이 찍힙니다. 오류도 빈 칸도 나지 않고 **틀린 값이 자신
+  있게** 보입니다.
+
+  그래서 `SettingRow` 에 `section` 을 넣었고(NotRequired — 평평한 reader 4개는
+  손대지 않았습니다), frontend 의 비교 화면은 `settingRowId()` 로 (section, key)
+  를 묶어 식별합니다.
+
+★ ENMP 의 값은 **전부 str 이 아닙니다** (office 확인 2026-07-30)
+
+  `measurement_focusing` 한 group 의 값을 확인한 결과입니다.
+
+  | key | type | 예시 |
+  | --- | --- | --- |
+  | Wait(s) | **float** | `0.0` |
+  | Offset(LSB) | str | `'0'` |
+  | Method | str | `'Fast2'` |
+  | Relative Position X(um) | **float** | `2.0` |
+  | Relative Position Y(um) | **float** | (값 미확인) |
+  | Mag | str | `'0'` |
+
+  ★ 한 group 안에서 **같은 "0" 을 서로 다른 dtype 으로** 적습니다 — `Wait(s)` 는
+    float `0.0` 이고 `Offset(LSB)` 는 str `'0'` 입니다. dtype 이 의미를 따라가지
+    않는다는 뜻이므로, **추론할 수 없고 읽을 수밖에 없습니다.**
+
+  ★ `Mag = '0'` 은 **sentinel 입니다** (user-confirmed 2026-07-30)
+
+    배율 숫자가 아니라 "**측정(measurement) 배율과 동일하게 쓴다**" 는 뜻입니다.
+    auto focusing group 에서 그렇습니다. 값을 받기 전에는 `'30000'` 이나
+    `'50.0K'` 일 것이라고 물었는데, 둘 다 아니었을 뿐 아니라 **애초에 같은
+    척도의 숫자가 아니었습니다**. key 이름으로 값을 추론하면 안 되는 이유의 가장
+    선명한 사례입니다.
+
+    화면에는 다른 값과 마찬가지로 **그대로** `0` 을 보여 줍니다. 이 화면을 보는
+    엔지니어는 `0` 의 뜻을 이미 알고 있기 때문입니다(user-confirmed 2026-07-30).
+    결과적으로 frontend 는 (section, key) 한 쌍에 대해 의미를 하드코딩하지 않고,
+    열린 key/value 계약이 그대로 유지되며, 이 이름들은 계속 자유롭게 바뀔 수
+    있습니다.
+
+  float 과 str 이 **한 group 안에서 섞입니다**. cond.txt 와 AMP 는 실제로 전부
+  str 이므로, "reader 는 문자열을 준다" 는 그 두 파일에 대한 사실이었지 이
+  pipeline 의 성질이 아니었습니다.
+
+  `SettingRow.value` 는 그대로 str 입니다 — adapter 의 `_to_rows` 가 전부
+  문자열로 바꾸기 때문입니다(float `2.0` 은 화면에 `'2.0'` 으로 도착합니다).
+  코드는 고칠 것이 없지만, **reader 가 문자열을 돌려준다고 가정하면 안 됩니다.**
+
+  ★ `Method` 는 ENMP 에서 `'Fast2'` 이고 AMP 에서는 `'Linear'` 입니다. key 이름이
+    같아도 **파일이 다르면 값의 어휘가 다릅니다.** 다른 파일의 값을 가져다 쓰지
+    않습니다.
+
+addressing_auto_focus1 / 2 (office 확인 2026-07-30)
+---------------------------------------------------
+
+두 pass 는 같습니다. type 은 8개 모두, 값은 `Method` 만 확인되었습니다.
+
+  | key | type | 예시 |
+  | --- | --- | --- |
+  | Method | str | `'Fast2'` |
+  | Offset(LSB) | str | (값 미확인) |
+  | Wait(s) | **float** | (값 미확인) |
+  | Relative Position X(um) | **float** | (값 미확인) |
+  | Relative Position Y(um) | **float** | (값 미확인) |
+  | Mag | str | (값 미확인) |
+  | Threshold | str | (값 미확인) |
+  | Charging Voltage | str | (값 미확인) |
+
+`Method` 가 두 focusing group 에서 똑같이 `'Fast2'` 라는 것이, addressing 과
+measurement 의 focusing 단계가 **같은 어휘를 쓴다**는 첫 증거입니다. 그래도
+나머지 값을 `measurement_focusing` 에서 베껴 오지는 않았습니다 — key 하나가
+일치하는 것은 증거이지 증명이 아니고, addressing focus 가 measurement focus 보다
+오래 기다릴 수도 있습니다.
+
+★ placeholder 규칙은 "**값** 미확인" 이 아니라 "**형식** 미확인" 입니다
+
+  type 이 float 이면 형식은 **다 아는 것**이고 크기만 열려 있으므로, mock 은
+  float 모양으로 냅니다. 반면 `str` 은 그 자체로 아무것도 정하지 않습니다 — 이
+  파일 하나 안에서만 해도 `'0'`, `'Fast2'`, `'50, 50'` 이 전부 str 입니다.
+  그래서 값이 미확인인 str key 는 계속 합성 hex 로 둡니다.
+
+dtype 규칙 — **추론입니다, 읽은 것이 아닙니다** (2026-07-30)
+------------------------------------------------------------
+
+확인된 type 14개가 신호 하나로 깔끔하게 갈립니다. **key 이름에 물리 단위가
+괄호로 붙어 있으면 float, 나머지는 전부 str** 입니다.
+
+  float   Wait(s) · Relative Position X(um) · Relative Position Y(um)
+  str     Offset(LSB) · Mag · Method · Threshold · Charging Voltage
+
+`Offset(LSB)` 가 이 규칙을 "괄호" 가 아니라 "**물리** 단위" 에 대한 것으로
+만듭니다 — LSB 는 세는 디지털 양자이고 str 로 옵니다.
+
+아직 읽지 않은 group 들의 type 은 사용자 지시에 따라 이 규칙으로 **채웠습니다**.
+표시는 언제나 `추론` 이며 `office 확인` 이 **아닙니다** — 이 둘을 구분하는 것이
+이 문서의 존재 이유입니다.
+
+  | group | key | type | 근거 |
+  | --- | --- | --- | --- |
+  | measurement_pattern_recognition | Wait(s) · Relative Position(um) · Offset(um) | float | 추론 |
+  | measurement_pattern_recognition | Acceptance · ABC · Centering · Contrast Mode | str | 추론 |
+  | addressing_pattern_recognition1 / 2 | Wait(s) | float | 추론 |
+  | addressing_pattern_recognition1 / 2 | Acceptance · ABC | str | 추론 |
+  | sequence_addressing · sequence_measurement | 전부 | str | 추론 |
+
+`measurement_pattern_recognition` 의 `Relative Position(um)` 은 focusing group 과
+달리 **X/Y 가 없습니다** — 축 하나가 아니라 key 하나입니다.
+
+★ 규칙이 type 을 정해 주어도 **값은 여전히 모릅니다**
+
+  `sequence_*` 의 key 는 전부 단계 이름이므로 값은 그 단계를 실행하는지 여부일
+  텐데, `'ON'`/`'OFF'` 인지 `'Yes'`/`'No'` 인지 순서 번호인지는 규칙이 알려 주지
+  않고 셋은 화면에서 전혀 다르게 보입니다. 그래서 str 로 추론된 key 의 값은
+  계속 placeholder 입니다.
+
+  이 규칙이 이미 한 번은 정신적으로 틀렸다는 점도 남겨 둡니다 — `Mag` 가
+  sentinel `'0'` 이라는 것은 어떤 규칙도 예측하지 못했습니다.
+
+OFFICE-VERIFY: 위 표의 **추론된 type 전부**, 그리고 `sequence_addressing` ·
+`sequence_measurement` · `measurement_pattern_recognition` ·
+`addressing_pattern_recognition1` / `2` 의 **값**. mock 은 그 값들에
+AMP 의 값 미확인 key 와 같은 **합성 hex** 를 넣습니다. key 이름에서 형식을
+추론하는 것(`Wait(s)` 이니 숫자겠지)은 AmpRow 의 16개 가짜 field 를 만들어 낸
+바로 그 추론입니다 — 실제로 확인된 유일한 group 에서도 놀라운 점은 크기가 아니라
+**dtype** 이었습니다.
+
+★ 이 key 이름들은 **바뀔 수 있습니다** (user-noted 2026-07-30)
+
+  사무실 파싱 코드가 raw data 를 더 읽어 들이면서 key 와 값이 달라질 수
+  있습니다. 바뀌면 고칠 곳은 `mock.py` 의 `_AFPR_SECTION_KEYS` 표 **하나**와 이
+  문서뿐입니다 — 코드가 이 문자열들에 의존하지 않고, contract 가 열린
+  key/value 이며, 화면은 오는 대로 그리기 때문입니다.
+
+ENAP… — align beam/PR 은 **optic 으로 나뉩니다** (office 확인 2026-07-30)
+=========================================================================
+
+`get_align_beam_pr_conditions` 는 ENAP 목록을 한 번에 받아
+**`{"OM": {...}, "SEM": {...}}`** 를 돌려줍니다. 이것으로 오래 열려 있던 질문이
+닫혔습니다 — **point 별로 나눌 수 있습니다.** P.No 1 = OM, P.No 2 = SEM 이므로
+optic 이 곧 point 입니다.
+
+두 optic 모두 key 2개로 같습니다.
+
+  | key | 예시 |
+  | --- | --- |
+  | Acceptance | `'200'` |
+  | Auto Focus | `'OFF'` |
+
+★ `Auto Focus` 에는 **공백**이 있습니다. 다섯 reader 를 통틀어 underscore 로
+  이어지지 않은 유일한 key 이므로, key 가 식별자 모양일 것이라고 가정하면
+  안 됩니다. frontend 가 (section, key) 를 이을 때 구분자로 공백이나 점이 아니라
+  NUL 을 쓰는 이유입니다.
+
+adapter 는 optic 분기를 **가장 먼저** 시도하고, 예전에 대비해 두었던 추측
+(입력 순서대로의 list, 파일 이름 key) 은 뒤에 그대로 남겨 두었습니다. 비용이
+없고, tool 세대에 따라 다르게 나오는 경우 곧바로 "나눌 수 없음" 으로 떨어지는
+것을 막아 주기 때문입니다.
+
+OFFICE-VERIFY
+-------------
+
+* **ENMP 각 group 안의 key 이름.** 위 절 참고. 그래서 contract 는 여전히 고정
+  컬럼이 아니라 열린 key/value(SettingBlock.rows)입니다 — 모르는 key 가
+  사라지지 않고 그대로 화면에 나옵니다. 2026-07-30 에 reader 5개가 한꺼번에
+  확인되었을 때 **contract 는 `section` 하나만 늘었고 나머지는 그대로였던 것**이
+  이 설계의 값어치입니다.
+* **다섯 reader 가 돌려주는 container 종류.** dict / 1행 DataFrame / 2열 DataFrame /
+  pair list 를 office_example.py 의 _to_rows 가 모두 받습니다. 단 1행 2열
+  DataFrame 은 두 해석이 모두 성립하고 결과가 다릅니다 — 지금은 "컬럼이 field"
+  쪽으로 읽습니다. 실제가 다르면 _to_rows 의 해당 분기를 뒤집습니다.
+* **ENAP{p:04d} 가 모든 P.No 에 대해 존재하는지.** 없으면 "파일 없음" 으로만
+  보이므로 화면이 깨지지는 않습니다.
+* **img_add2 의 PR… 파일 자체에 쓸 정보가 있는지.** 지금은 EN… 로 바꾼 것만 읽습니다.
