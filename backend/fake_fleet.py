@@ -34,7 +34,9 @@ class FakeTool:
         self.drops = 0
         self.lose_rename_reply: set[str] = set()  # rename 은 일어나고 응답만 사라지는 경로
         self.corrupt_downloads: set[str] = set()  # 내려받을 때 내용이 바뀌어 오는 경로
+        self.refuse_login = False
         self._ops = 0
+        self._discarded = False  # FtpClient 처럼 rename 응답 유실 뒤엔 연결이 없습니다
 
     def add(self, path: str, data: bytes, mtime: datetime) -> None:
         self.files[path] = (data, mtime)
@@ -58,10 +60,14 @@ class FakeTool:
     def __enter__(self) -> "FakeTool":
         if not self.reachable:
             raise ConnectionRefusedError("[Errno 61] Connection refused")
-        self._ops = 0
+        if self.refuse_login:
+            raise error_perm("530 Login incorrect.")
+        self._ops, self._discarded = 0, False
         return self
 
     def _op(self) -> None:
+        if self._discarded:  # 실제 FtpClient 는 `_ftp = None` 이라 다음 호출이 이렇게 깨집니다.
+            raise AttributeError("'NoneType' object has no attribute 'sendcmd'")
         if self.drops and self._ops >= self.drop_after:
             self.drops -= 1
             raise ConnectionResetError("[Errno 54] Connection reset by peer")
@@ -129,6 +135,7 @@ class FakeTool:
             raise TargetExists(remote_path)
         self.files[remote_path] = (bytes(data), datetime.now(KST))
         if remote_path in self.lose_rename_reply:
+            self._discarded = True
             raise TransferUncertain(f"rename -> {remote_path}: reply lost", temp_path=f"{remote_path}.0a1b2c.part")
 
     def list_idp_files(self, data_dir: str, **limits) -> list[FileInfo]:

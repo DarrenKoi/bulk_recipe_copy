@@ -78,14 +78,20 @@ class _Worker:
     def run(self) -> None:
         queue, i, failures = self.queue(), 0, 0
         while i < len(queue):
+            entered = False
             try:
                 with self.app.config["CONNECT"](self.tool) as ftp:
+                    entered = True
                     while i < len(queue):
                         self.send(ftp, *queue[i])
                         i, failures = i + 1, 0
             except _Discarded:
                 i, failures = i + 1, 0
-            except error_perm as exc:  # 장비가 거부한 파일 하나. 다음 파일은 새 연결로.
+            except error_perm as exc:
+                if not entered:  # 로그인 거부(530 등). 다시 붙어도 같으니 남은 파일을 모두 실패로.
+                    store.fail_pending(self.db, self.job_id, f"로그인 거부: {exc}", eqp=self.eqp)
+                    return
+                # 장비가 거부한 파일 하나. 다음 파일은 새 연결로.
                 self._end(queue[i][2], "failed", f"장비 거부: {exc}")
                 i, failures = i + 1, 0
             except _CONNECTION_ERRORS:
@@ -98,6 +104,15 @@ class _Worker:
                                                   else ("failed", "연결 실패")))
                     store.fail_pending(self.db, self.job_id, "연결 실패", eqp=self.eqp)
                     return
+            except Exception as exc:
+                # 예상 못 한 오류. 잡은 파일은 쓰였는지 모르니 uncertain, 나머지는 실패로 끝내
+                # job 이 in_progress 에 걸려 끝나지 않는 일을 막습니다.
+                self.app.logger.exception("job %s %s: worker crashed", self.job_id, self.eqp)
+                reason = f"작업자 오류: {type(exc).__name__}"
+                if self.claimed is not None:
+                    self._end(self.claimed, "uncertain", reason)
+                store.fail_pending(self.db, self.job_id, reason, eqp=self.eqp)
+                return
 
     def _end(self, path: str, to: str, reason: str | None = None, temp_path: str | None = None) -> None:
         store.move_file(self.db, self.job_id, self.eqp, path, "in_progress", to, reason=reason, temp_path=temp_path)
@@ -115,7 +130,7 @@ class _Worker:
                 # 같은 스냅샷을 쓰는 job 전체를 멈춥니다. 재수집은 티켓 12.
                 store.fail_pending(self.db, self.job_id, "스냅샷 손상")
                 return
-            if len(data) > self.max_bytes:
+            if data is None:
                 return self._end(path, "failed", "전송 크기 상한 초과")
             overwrite = (self.eqp, *recipe) in self.plan["overwrites"]
             if not overwrite and recipe not in self.checked:
@@ -133,7 +148,9 @@ class _Worker:
             except TargetExists:
                 return self._end(path, "failed", _APPEARED)
             except TransferUncertain as exc:
-                return self._end(path, "uncertain", "rename 응답 유실", exc.temp_path)
+                # FtpClient 는 이미 연결을 버렸습니다. 다음 파일은 새 연결로.
+                self._end(path, "uncertain", "rename 응답 유실", exc.temp_path)
+                raise _Discarded from None
             self.put_done = True
         try:
             got = ftp.download(path, max_bytes=self.max_bytes, deadline=self.seconds)
@@ -143,11 +160,15 @@ class _Worker:
         ok = hashlib.sha256(got).hexdigest() == self.plan["manifest"][path]
         self._end(path, *(("verified",) if ok else ("failed", "해시 불일치")))
 
-    def _snapshot(self, path: str) -> bytes:
+    def _snapshot(self, path: str) -> bytes | None:
+        """스냅샷 바이트. 전송 상한을 넘으면 None(상한 + 1 바이트까지만 읽습니다)."""
         try:
-            data = (Path(self.plan["snapshot_dir"]) / path.lstrip("/")).read_bytes()
+            with open(Path(self.plan["snapshot_dir"]) / path.lstrip("/"), "rb") as f:
+                data = f.read(self.max_bytes + 1)
         except OSError:
             raise _SnapshotDamaged from None
+        if len(data) > self.max_bytes:
+            return None
         if hashlib.sha256(data).hexdigest() != self.plan["manifest"].get(path):
             raise _SnapshotDamaged
         return data
@@ -184,5 +205,5 @@ def _logged(app: Flask, worker: _Worker) -> None:
     try:
         worker.run()
     except Exception:
-        # in_progress 로 남은 파일은 재기동 대조(티켓 12)가 정리합니다.
+        # run() 의 정리 자체가 실패한 경우뿐입니다. 남은 in_progress 는 재기동 대조(티켓 12).
         app.logger.exception("job %s %s: worker crashed", worker.job_id, worker.eqp)

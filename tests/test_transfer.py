@@ -1,6 +1,9 @@
+import os
 from datetime import datetime
 
 import pytest
+from pyftpdlib.handlers import FTPHandler
+from test_ftp_client import DropOnRenameHandler, _Server
 
 from backend import create_app, layout, store
 from backend.fake_fleet import KST, FakeTool
@@ -143,6 +146,7 @@ def test_a_raw_folder_that_appeared_after_confirmation_fails_that_pair_without_w
 
 
 def test_a_lost_rename_reply_is_uncertain_with_its_temp_path_and_the_copy_goes_on(make, fleet):
+    # 가짜 장비는 FtpClient 처럼 그 연결을 버립니다. 뒤의 파일들은 새 연결로 verified 여야 합니다.
     fleet["6MCDE305"].lose_rename_reply.add(A_TIF)
     app, c = make()
     job_id = start(c, targets=["6MCDE305"])
@@ -208,3 +212,82 @@ def test_a_file_over_the_per_transfer_size_cap_is_not_sent(make, fleet):
     ])
     assert set(recipe_files(fleet["6MCDE305"])) == {
         f"{P1_RAW_DIR}/sub/b.csv", f"{layout.raw_dir('ABC_GATE', 'W1', 'P2')}/c.tif"}
+
+
+class DropOnATifRename(DropOnRenameHandler):
+    def ftp_RNTO(self, path):
+        if path.endswith("/a.tif"):
+            super().ftp_RNTO(path)
+        else:
+            FTPHandler.ftp_RNTO(self, path)
+
+
+def test_a_lost_rename_reply_on_a_real_ftp_server_does_not_stall_the_worker(make, fleet, tmp_path):
+    root = tmp_path / "ftp"
+    os.makedirs(root / layout.ROOT.lstrip("/"))
+    server = _Server(root, DropOnATifRename)
+    try:
+        app, c = make()
+        app.config["CONNECT"] = lambda tool: server.client() if tool.eqp_id == "6MCDE305" else fleet[tool.eqp_id]
+        job_id = start(c, targets=["6MCDE305"])
+        run_until_idle(app)
+    finally:
+        server.close()
+
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert job["file_counts"] == counts(verified=4, uncertain=1)
+    [problem] = job["problems"]
+    assert (problem["path"], problem["state"], problem["reason"]) == (A_TIF, "uncertain", "rename 응답 유실")
+    assert problem["temp_path"].startswith(A_TIF + ".")
+    for path, data in source_recipe_files(fleet).items():
+        assert (root / path.lstrip("/")).read_bytes() == data
+
+
+def test_a_refused_login_fails_every_file_of_that_target(make, fleet):
+    fleet["6MCDE305"].refuse_login = True
+    app, c = make()
+    job_id = start(c)
+    run_until_idle(app)
+
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert job["file_counts"] == counts(verified=5, failed=5)
+    assert {(p["eqp"], p["reason"]) for p in job["problems"]} == {("6MCDE305", "로그인 거부: 530 Login incorrect.")}
+
+
+def test_an_unexpected_worker_error_ends_that_target_without_leaving_files_in_progress(make, fleet):
+    def boom(path):
+        if path == A_TIF:
+            raise ZeroDivisionError("injected")
+
+    fleet["6MCDE305"].on_download = boom  # put 뒤 재다운로드 직전
+    app, c = make()
+    job_id = start(c)
+    run_until_idle(app)
+
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert job["file_counts"] == counts(verified=6, uncertain=1, failed=3)
+    reason = "작업자 오류: ZeroDivisionError"
+    assert sorted((p["eqp"], p["path"], p["state"], p["reason"]) for p in job["problems"]) == sorted([
+        ("6MCDE305", A_TIF, "uncertain", reason),
+        ("6MCDE305", f"{P1_RAW_DIR}/sub/b.csv", "failed", reason),
+        ("6MCDE305", layout.idp_path("ABC_GATE", "W1", "P2"), "failed", reason),
+        ("6MCDE305", f"{layout.raw_dir('ABC_GATE', 'W1', 'P2')}/c.tif", "failed", reason),
+    ])
+    assert recipe_files(fleet["4CCD6701"]) == source_recipe_files(fleet)
+
+
+def test_an_oversized_snapshot_file_is_refused_without_reading_it_whole(make, fleet, tmp_path):
+    # 상한을 넘는 파일은 상한 + 1 바이트만 읽으니 해시하지 않습니다: 내용이 달라도 "스냅샷 손상"이 아닙니다.
+    app, c = make(transfer_max_bytes=4)
+    job_id = start(c, targets=["6MCDE305"])
+    collect(app, store.claim_next_waiting(app.config["DB_PATH"]))
+    (tmp_path / "snapshots" / str(job_id) / A_TIF.lstrip("/")).write_bytes(bytes(1024**2))
+
+    transfer_job(app, job_id)
+
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert {(p["path"], p["reason"]) for p in job["problems"]} == {
+        (P1_IDP, "전송 크기 상한 초과"),
+        (A_TIF, "전송 크기 상한 초과"),
+        (layout.idp_path("ABC_GATE", "W1", "P2"), "전송 크기 상한 초과"),
+    }
