@@ -160,7 +160,9 @@ CPU가 아니라 **프로세스 수명**입니다. SKEWNONO worker 1의 스레�
 1. ~~새 web app 슬롯의 도달성~~ — **user-confirmed 2026-10-18**: 장비 FTP, office
    Redis, `LASTUSER` 쿠키 모두 닿습니다. `ftp_handler`를 그대로 씁니다.
 2. 레이아웃: `.idw` 파일의 정확한 경로. raw 폴더 `{idp}/`의 실제 내용과 확장자.
-   복사에서 빼야 할 파일이 있는가?
+   복사에서 빼야 할 파일이 있는가? `data/*/*.idp`를 목록 명령 한 번으로 얻을 수
+   있는가(`LIST -R`, 와일드카드 `LIST`/`NLST`)? 안 되면 "LIST 1회"를 N+1로 바꿀지
+   사용자가 결정합니다(spec.md, 2026-10-18 추가).
 3. Hitachi FTP: `RNTO`가 기존 파일을 덮는가(아니면 `DELE` 뒤 `RNTO`)? `MKD`가
    되는가? 한 장비에 동시에 열 수 있는 세션 수(같은 장비를 `msr_image`도 1개 씀)?
 

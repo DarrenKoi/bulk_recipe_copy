@@ -84,6 +84,61 @@ with client() as c:
   (장비가 실행 중에 쓰는 임시 파일, 로그 등)이 있어 보이면 그 이름.
 - `L2`의 entries 수. 장비 한 대의 class 하나에 레시피가 몇 개 있는지의 감입니다.
 
+## 1-1. 레시피 목록을 한 번에 얻는 명령 (읽기만, 2026-10-18 추가)
+
+앱은 class 하나의 레시피 표(idw, idp, 수정 시각)를 **목록 명령 한 번**으로 만들려고
+합니다. 그런데 `.idp`는 `data/{idw}/` 안에 있어 `LIST data/` 한 번으로는 idw 폴더만
+보입니다. 한 번에 `data/*/*.idp`가 보이는 명령이 있는지 세 가지를 시험합니다. 1절과
+같은 장비·`CLASS`로 돌립니다.
+
+`R1`(`LIST -R`)은 raw 폴더까지 전부 내려가므로 클 수 있습니다. 2000줄에서 끊고
+연결을 버리도록 했고, 명령마다 새 연결을 씁니다. 장비가 측정 중이면 `R1`은
+건너뛰어도 됩니다.
+
+```python
+import time
+
+class Enough(Exception):
+    pass
+
+data = f"{ROOT}/{CLASS}/data"
+for tag, cmd in (
+    ("R1", f"LIST -R {data}"),
+    ("R2", f"LIST {data}/*/*.idp"),
+    ("R3", f"NLST {data}/*/*.idp"),
+):
+    lines = []
+    def keep(line):
+        lines.append(line)
+        if len(lines) >= 2000:
+            raise Enough
+    started = time.monotonic()
+    cut = ""
+    try:
+        with client() as c:
+            c._ftp.retrlines(cmd, keep)
+    except Enough:
+        cut = " (2000줄에서 끊음)"
+    except Exception as exc:
+        print(f"{tag} FAIL {type(exc).__name__}: {str(exc)[:60]}")
+        continue
+    idp = [l for l in lines if l.rstrip().endswith(".idp")]
+    heads = [l for l in lines if l.rstrip().endswith(":")]
+    print(f"{tag} lines={len(lines)} idp={len(idp)} headers={len(heads)} "
+          f"sec={time.monotonic() - started:.1f}{cut}")
+    for l in (heads[:2] + idp[:3]):
+        print("   ", l[:100])
+```
+
+보고 싶은 것:
+
+- 셋 중 어느 것이 `idp` 개수 0이 아닌 결과를 내는가. `FAIL`이나 `idp=0`이면 그 명령은
+  안 되는 것으로 봅니다.
+- `R1`의 `headers` 줄(`.../data/{idw}:` 모양)이 있는가. 있어야 어느 `.idp`가 어느 idw
+  소속인지 알 수 있습니다.
+- `R2`·`R3` 줄에 `{idw}/` 경로가 붙어 나오는가, 파일 이름만 나오는가.
+- 각 `sec`. 표 하나를 띄우는 데 걸리는 시간의 감입니다.
+
 ## 2. 쓰기 동작 조사 (조사용 폴더 안에서만)
 
 앱의 쓰기 경로는 `FtpClient.put`(임시 이름 STOR → `RNTO`)입니다. 덮어쓰기 모드와
@@ -162,3 +217,5 @@ with client() as c:
 - D. `cleanup left:` 줄이 있었는지, 손으로 지웠는지.
 - E. 3절의 세션 상한 또는 `모름`.
 - F. 2절을 돌린 장비의 eqp_id와 그 장비가 유휴 상태였는지.
+- G. 1-1절 스크립트 출력 전체입니다(`R1`~`R3`). 레시피 이름은 지워도 되지만, 경로가
+  붙어 나왔는지 알 수 있게 `/`와 `:`는 남겨 주십시오.
