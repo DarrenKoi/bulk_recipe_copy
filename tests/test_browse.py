@@ -155,3 +155,20 @@ def test_undecided_recipe_list_command_is_501_with_reason(make_client, fleet):
     assert resp.json == {
         "error": {"code": "not_implemented", "message": "레시피 목록 명령 미확정, 티켓 13"}
     }
+
+
+def test_entry_budget_counts_every_recipe_the_listing_returns(make_client):
+    # 레시피 3개(W1/P1, W1/P2, W2/P1)는 예산 2를 넘습니다. W1 폴더의 LIST가 4줄(P1/, P2/, P1.idp, P2.idp)이라 예산 4면 들어갑니다.
+    resp = make_client(browse_max_entries=2).get("/api/tools/6MCDE301/classes/ABC_GATE/recipes")
+    assert resp.status_code == 502
+    assert resp.json["error"]["code"] == "browse_too_large"
+    resp = make_client(browse_max_entries=4).get("/api/tools/6MCDE301/classes/ABC_GATE/recipes")
+    assert [(r["idw"], r["idp"]) for r in resp.json["recipes"]] == [("W1", "P1"), ("W1", "P2"), ("W2", "P1")]
+
+
+def test_a_browse_that_uses_the_budget_exactly_succeeds(make_client, fleet):
+    # 항목은 빈 하위 폴더 하나뿐이라 예산 1로 끝나야 합니다. 그 빈 폴더의 LIST는 남은 예산 0으로 돕니다.
+    fleet["6MCDE301"].dirs.add(layout.raw_dir("ABC_GATE", "W1", "P2") + "/empty")
+    resp = make_client(browse_max_entries=1).get("/api/tools/6MCDE301/classes/ABC_GATE/recipes/W1/P2")
+    assert resp.status_code == 200
+    assert resp.json["file_count"] == 0

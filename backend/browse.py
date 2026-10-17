@@ -32,11 +32,11 @@ class _Bounded:
         left = self._end - time.monotonic()
         if left <= 0:
             raise TransferTimeout(f"browse exceeded {self.seconds}s")
-        if self._entries <= 0:
-            raise ListingTooLarge(f"browse has over {self.max_entries} entries")
         return {"deadline": left, "max_entries": self._entries}
 
     def _spend(self, entries: list) -> list:
+        if len(entries) > self._entries:
+            raise ListingTooLarge(f"browse has over {self.max_entries} entries")
         self._entries -= len(entries)
         return entries
 
