@@ -1,0 +1,19 @@
+{
+  "name": "bulk-recipe-copy-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "nuxt generate",
+    "dev": "nuxt dev",
+    "postinstall": "nuxt prepare"
+  },
+  "dependencies": {
+    "@iconify-json/lucide": "^1.2.87",
+    "@nuxt/ui": "^4.6.1",
+    "nuxt": "^4.4.2",
+    "tailwindcss": "^4.1.18"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

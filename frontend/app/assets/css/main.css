@@ -1,0 +1,781 @@
+@import "tailwindcss";
+@import "@nuxt/ui";
+
+/* Self-hosted fonts (offline-safe, no CDN access required).
+   Public Sans / JetBrains Mono sourced from @fontsource packages (woff2 only);
+   re-copy from node_modules/@fontsource/<family>/files/ when bumping versions.
+   Spoqa Han Sans Neo sourced from the `spoqa-han-sans` npm package (v3.3.0),
+   Subset/SpoqaHanSansNeo/*.woff2 (SIL OFL 1.1) — one file per weight, Latin + Hangul. */
+@font-face {
+  font-family: 'Public Sans';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url('/fonts/public-sans-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Public Sans';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url('/fonts/public-sans-latin-500-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Public Sans';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url('/fonts/public-sans-latin-600-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Public Sans';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url('/fonts/public-sans-latin-700-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Spoqa Han Sans Neo';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url('/fonts/spoqa-han-sans-neo-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Spoqa Han Sans Neo';
+  font-style: normal;
+  font-display: swap;
+  /* Spoqa Han Sans Neo ships no SemiBold. Medium covers the 500–600 range so that
+     font-semibold / font-weight:600 render as Medium instead of jumping to Bold.
+     To make 600 render as Bold instead, narrow this to `500` and add `600 700`
+     to the Bold face below. */
+  font-weight: 500 600;
+  src: url('/fonts/spoqa-han-sans-neo-500-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Spoqa Han Sans Neo';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url('/fonts/spoqa-han-sans-neo-700-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url('/fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url('/fonts/jetbrains-mono-latin-500-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url('/fonts/jetbrains-mono-latin-600-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url('/fonts/jetbrains-mono-latin-700-normal.woff2') format('woff2');
+}
+
+@theme static {
+  --font-sans: 'Spoqa Han Sans Neo', 'Public Sans', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Segoe UI', sans-serif;
+  --font-korean: 'Spoqa Han Sans Neo', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', 'Segoe UI Mono', 'SFMono-Regular', Menlo, Consolas, monospace;
+
+  --color-zinc-50: #FAFAFA;
+  --color-zinc-100: #F4F4F5;
+  --color-zinc-200: #E4E4E7;
+  --color-zinc-300: #D4D4D8;
+  --color-zinc-400: #A1A1AA;
+  --color-zinc-500: #71717A;
+  --color-zinc-600: #52525B;
+  --color-zinc-700: #3F3F46;
+  --color-zinc-800: #27272A;
+  --color-zinc-900: #18181B;
+  --color-zinc-950: #09090B;
+
+  /* Paper — the warm neutral ramp NuxtUI draws from (app.config.ts maps
+     primary + neutral onto it). Zinc is cool (hue ~285); every NuxtUI default
+     used to pull from it, which is why buttons and inputs read gray-blue on a
+     cream page. Same lightness steps as zinc, re-hued to the paper/walnut
+     family (70-80°) so NuxtUI components sit in the same material as the cards. */
+  --color-paper-50: oklch(0.985 0.006 80);
+  --color-paper-100: oklch(0.965 0.010 80);
+  --color-paper-200: oklch(0.910 0.014 80);
+  --color-paper-300: oklch(0.850 0.014 78);
+  --color-paper-400: oklch(0.720 0.014 74);
+  --color-paper-500: oklch(0.600 0.014 70);
+  --color-paper-600: oklch(0.500 0.014 64);
+  --color-paper-700: oklch(0.400 0.014 60);
+  --color-paper-800: oklch(0.300 0.010 66);
+  --color-paper-900: oklch(0.245 0.008 70);
+  --color-paper-950: oklch(0.180 0.008 70);
+}
+
+/* F · Paper · tinted cards — warm cream page + cards one shade lighter (still warm).
+   Page and surface share the same hue (80°, cream); cards aren't pure white, so the
+   whole UI reads as one warm material instead of "white islands floating on gray." */
+:root {
+  --sk-canvas: oklch(0.96 0.012 80);
+  --sk-surface: oklch(0.99 0.006 80);
+  --sk-muted-surface: oklch(0.97 0.01 80);
+  --sk-border: oklch(0.91 0.014 80);
+  --sk-border-soft: oklch(0.94 0.01 80);
+  --sk-nav-bg: oklch(0.97 0.01 80 / 0.82);
+  --sk-nav-border: oklch(0.90 0.014 80);
+  /* --sk-ink is defined once, in the selection block below (#15110D). */
+  --sk-ink-muted: oklch(0.47 0.014 60);
+  --sk-ink-subtle: oklch(0.66 0.012 70);
+  --sk-chip-bg: oklch(0.95 0.014 80);
+  --sk-chip-text: oklch(0.45 0.014 60);
+  --sk-on-bg: #d9f5e8;
+  --sk-on-fg: #0f5132;
+  --sk-off-bg: oklch(0.95 0.014 80);
+  --sk-off-fg: oklch(0.45 0.014 60);
+  /* Dark field — SEM imagery only. Real CD-SEM images are dark-field, so these
+     three do NOT invert with the theme: they describe a photograph, not chrome.
+     Declared in :root and deliberately absent from .dark for that reason.
+     Toned to the walnut canvas + cream ink rather than raw slate, so the
+     simulation still reads as part of this system in light mode. */
+  --sk-field: oklch(0.21 0.008 70);
+  --sk-field-ink: oklch(0.94 0.008 80);
+  --sk-field-core: oklch(0.40 0.014 60);
+  /* Warm crimson accent — same identity as the favicon slash, retoned to sit on cream. */
+  --sk-accent: oklch(0.58 0.13 35);
+  --sk-accent-soft: oklch(0.95 0.025 60);
+  --sk-accent-border: oklch(0.58 0.13 35 / 0.22);
+  --sk-accent-tint: oklch(0.58 0.13 35 / 0.06);
+  /* Connected/Down palette for backend health card. Soft fills sit on muted-surface; */
+  /* borders use a 32% alpha of the accent so the badges read as label, not button. */
+  --sk-ok: oklch(0.62 0.13 145);
+  --sk-ok-soft: oklch(0.94 0.05 145);
+  --sk-ok-border: oklch(0.62 0.13 145 / 0.32);
+  --sk-bad: oklch(0.58 0.18 28);
+  --sk-bad-soft: oklch(0.94 0.04 30);
+  --sk-bad-border: oklch(0.58 0.18 28 / 0.32);
+  /* Hover for the -soft fill, and only where a bad-state element is clickable. */
+  /* Light hovers away from the page (darker); the dark block below hovers away */
+  /* from the canvas (lighter). L step matches the rose-100 -> rose-200 distance */
+  /* this replaced, so the change stays as visible as what users had. */
+  --sk-bad-soft-hover: oklch(0.89 0.07 30);
+  /* Whole-row/card wash, as opposed to the -soft fill of the badge naming the */
+  /* problem. Alpha-over-surface (like --sk-accent-tint) so the two strengths */
+  /* of red stay ordered in both themes. */
+  --sk-bad-tint: oklch(0.58 0.18 28 / 0.06);
+  --sk-warn: oklch(0.70 0.15 75);
+  --sk-warn-soft: oklch(0.94 0.06 85);
+  --sk-warn-border: oklch(0.70 0.15 75 / 0.32);
+
+  /* No --sk-chart-* here: ECharts draws to canvas and can't read custom
+     properties, so chart color lives in utils/chartPalette.ts. Bind from there
+     rather than add a second copy that drifts. */
+
+  /* Bolder selection system (Implementation Brief v1.0, 2026.05).
+     Two semantic families: BLACK = navigation, TERRACOTTA = filter.
+     Existing --sk-canvas/--sk-surface/--sk-accent stay as the warm cream
+     base; these tokens add the explicit "ink" fill + brand-soft tint that
+     the bolder direction needs. */
+  --sk-ink: #15110D;            /* near-black, nav active fill */
+  --sk-ink-fg: #F8F4EC;         /* cream foreground on ink fill */
+  --sk-brand: #C75A3C;          /* terracotta, filter active fill */
+  --sk-brand-fg: #FFF7F1;       /* on terracotta */
+  --sk-brand-soft: #F3DCD2;     /* tint background for filter rows */
+  --sk-brand-ink: #8A3D27;      /* readable text on --sk-brand-soft */
+
+  /* Radius scale — soft rectangles only. Anything outside this set is a bug. */
+  --sk-r-sidebar: 6px;
+  --sk-r-chip: 8px;
+  --sk-r-nav: 10px;
+  --sk-r-card: 14px;
+
+  /* One focus ring for both selection families (BLACK nav + TERRACOTTA filter). */
+  --sk-focus-ring: oklch(0.58 0.13 35 / 0.45);
+}
+
+/* Dark · Walnut — paper at night. Page L≈0.21, hue 70°; cards lift one step to
+   L≈0.245 in the same hue family, so the tinted-card pattern survives inversion.
+   Terracotta accent brightens to L≈0.74 so it still pops against the warm dark. */
+.dark {
+  --sk-canvas: oklch(0.21 0.008 70);
+  --sk-surface: oklch(0.245 0.008 70);
+  --sk-muted-surface: oklch(0.225 0.008 70);
+  --sk-border: oklch(0.295 0.008 70);
+  --sk-border-soft: oklch(0.265 0.008 70);
+  --sk-nav-bg: oklch(0.225 0.008 70 / 0.78);
+  --sk-nav-border: oklch(0.30 0.008 70);
+  /* --sk-ink is defined once, in the selection block below (#F4EFE6). */
+  --sk-ink-muted: oklch(0.74 0.008 70);
+  --sk-ink-subtle: oklch(0.56 0.008 70);
+  --sk-chip-bg: oklch(0.285 0.008 70);
+  --sk-chip-text: oklch(0.74 0.008 70);
+  --sk-on-bg: #052e16;
+  --sk-on-fg: #bbf7d0;
+  --sk-off-bg: oklch(0.285 0.008 70);
+  --sk-off-fg: oklch(0.74 0.008 70);
+  --sk-accent: oklch(0.74 0.14 38);
+  --sk-accent-soft: oklch(0.34 0.05 38);
+  --sk-accent-border: oklch(0.74 0.14 38 / 0.32);
+  --sk-accent-tint: oklch(0.74 0.14 38 / 0.10);
+  /* Status palette · dark — bump fg lightness so tinted soft fills stay legible on walnut. */
+  --sk-ok: oklch(0.78 0.14 150);
+  --sk-ok-soft: oklch(0.32 0.06 150);
+  --sk-ok-border: oklch(0.78 0.14 150 / 0.32);
+  --sk-bad: oklch(0.72 0.17 28);
+  --sk-bad-soft: oklch(0.32 0.06 28);
+  --sk-bad-border: oklch(0.72 0.17 28 / 0.32);
+  --sk-bad-soft-hover: oklch(0.38 0.08 28);
+  --sk-bad-tint: oklch(0.72 0.17 28 / 0.10);
+  --sk-warn: oklch(0.80 0.15 78);
+  --sk-warn-soft: oklch(0.34 0.06 78);
+  --sk-warn-border: oklch(0.80 0.15 78 / 0.32);
+
+  /* Bolder selection system · dark — invert the ink so nav pills still read
+     as "the darkest thing on the page". Brand brightens to stay legible
+     on walnut; brand-soft becomes a low-saturation tint of the dark canvas. */
+  --sk-ink: #F4EFE6;            /* cream fill for nav active in dark mode */
+  --sk-ink-fg: #15110D;         /* near-black foreground on cream fill */
+  --sk-brand: #E0553F;          /* warmer terracotta on dark */
+  --sk-brand-fg: #FFF7F1;       /* cream on warm terracotta — same as light */
+  --sk-brand-soft: oklch(0.30 0.05 38);
+  --sk-brand-ink: #F3DCD2;
+
+  --sk-focus-ring: oklch(0.74 0.14 38 / 0.45);
+}
+
+/* ── NuxtUI bridge ────────────────────────────────────────────────────────────
+   NuxtUI themes its components off a fixed set of semantic tokens (--ui-bg,
+   --ui-text, --ui-border, …), which by default resolve to the neutral color
+   ramp. Pointing them at --sk-* here is what makes a bare <UCard>, <UButton>,
+   <UInput>, <USelect> or <UTable> come out in the paper/walnut material with no
+   per-call-site classes — before this block, every component had to be patched
+   at its call site with bg-/text-/border- overrides, and the ones that were
+   missed rendered stock zinc.
+
+   Declared *outside* @layer, so it beats NuxtUI's own @layer theme defaults.
+   Only :root is needed: the --sk-* tokens already flip under .dark, so the dark
+   values follow automatically and can never drift out of sync with light. */
+:root {
+  /* Surfaces. --ui-bg is NuxtUI's "default" surface = our card surface; the
+     page floor stays --sk-canvas via the body rule below. */
+  --ui-bg: var(--sk-surface);
+  --ui-bg-muted: var(--sk-muted-surface);
+  --ui-bg-elevated: var(--sk-muted-surface);
+  --ui-bg-accented: var(--sk-border-soft);
+  --ui-bg-inverted: var(--sk-ink);
+
+  /* Text — the three-step ink hierarchy. NuxtUI's "toned" has no counterpart in
+     our scale, so it folds into muted rather than inventing a fourth step. */
+  --ui-text-dimmed: var(--sk-ink-subtle);
+  --ui-text-muted: var(--sk-ink-muted);
+  --ui-text-toned: var(--sk-ink-muted);
+  --ui-text: var(--sk-ink);
+  --ui-text-highlighted: var(--sk-ink);
+  --ui-text-inverted: var(--sk-ink-fg);
+
+  --ui-border: var(--sk-border);
+  --ui-border-muted: var(--sk-border-soft);
+  --ui-border-accented: var(--sk-border);
+  --ui-border-inverted: var(--sk-ink);
+
+  /* NAVIGATE = ink. Makes UButton's default solid fill the ink fill the design
+     system already specifies for primary actions, instead of a zinc-500 slab. */
+  --ui-primary: var(--sk-ink);
+}
+
+/* One ring color for both selection families, per the design system. */
+:focus-visible {
+  outline: 2px solid var(--sk-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Tailwind v4's Preflight dropped v3's opinionated `cursor: pointer` on buttons,
+   so every UButton renders with an arrow cursor and reads as non-interactive.
+   Declared outside @layer so it beats Preflight's `@layer base` rule. Disabled
+   controls keep their own cursor. */
+button:not(:disabled),
+[role='button']:not([aria-disabled='true']),
+summary {
+  cursor: pointer;
+}
+
+html,
+body,
+#__nuxt {
+  min-height: 100%;
+}
+
+/* Always reserve the vertical scrollbar gutter so centered (mx-auto) page
+   content keeps the same horizontal position whether or not a page scrolls.
+   Without this, short pages (e.g. /intro) re-center ~8px to the right vs.
+   scrolling pages, making them look like a different width. */
+html {
+  scrollbar-gutter: stable;
+}
+
+body {
+  background: var(--sk-canvas);
+}
+
+.dark body {
+  background: var(--sk-canvas);
+}
+
+/* Warm radial wash from the top-right — the page subtly absorbs the brand accent
+   at 5% opacity, so the logo's crimson no longer sits orphaned against dead gray. */
+.dashboard-bg-layer {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(1000px 480px at 100% -10%, oklch(0.58 0.13 35 / 0.05), transparent 60%);
+}
+
+.dark .dashboard-bg-layer {
+  background: radial-gradient(1100px 520px at 100% -15%, oklch(0.74 0.14 38 / 0.06), transparent 62%);
+}
+
+/* Tinted card: warm border (not accent-tinted) + soft drop shadow. The ambient
+   shadow uses negative spread (-18px) so it stays loose and diffuse instead of
+   a hard halo, which is what makes the card read as paper rather than plastic. */
+.dashboard-surface {
+  border: 1px solid var(--sk-border);
+  background: var(--sk-surface);
+  box-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.02),
+    0 8px 22px -18px rgba(0, 0, 0, 0.18);
+}
+
+/* Inset top highlight (1px white at 2%) mimics how light catches the upper edge
+   of physical paper — without it, dark cards blur into the page at the top. */
+.dark .dashboard-surface {
+  border-color: var(--sk-border);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.02),
+    0 8px 22px -18px rgba(0, 0, 0, 0.6);
+}
+
+/* Crimson trim on active pill-style nav items. Sits inside the dark pill
+   as a 2px bottom underline — only visible on the active state. */
+.sk-nav-accent {
+  box-shadow: inset 0 -2px 0 0 var(--sk-accent);
+}
+
+/* Crimson left-edge bar for the active FAB row — reads as a "selected nav item"
+   indicator even at icon-rail width. Combines with existing shadow-sm. */
+.sk-fab-active {
+  box-shadow:
+    inset 2px 0 0 0 var(--sk-accent),
+    0 1px 2px 0 rgba(0, 0, 0, 0.05);
+}
+
+.sk-pill-on,
+.sk-pill-off {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 9999px;
+  padding: 0.2rem 0.65rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.sk-pill-on {
+  background: var(--sk-on-bg);
+  color: var(--sk-on-fg);
+}
+
+.sk-pill-off {
+  background: var(--sk-off-bg);
+  color: var(--sk-off-fg);
+}
+
+/* `type="search"` makes WebKit draw its own ✕ (::-webkit-search-cancel-button)
+   inside the field whenever it is focused and non-empty. Where we already render
+   a styled clear button, that native glyph is a SECOND X sitting next to ours.
+   Hiding it — rather than downgrading the field to type="text" — keeps the search
+   semantics (inputmode="search", Esc-to-clear) and makes Chrome agree with
+   Firefox, which never drew one. Apply only to fields that have their own clear
+   control; a search field without one still needs the native button.
+   The two selectors cover both a raw <input> carrying the class and a NuxtUI
+   <UInput>, whose class prop lands on the wrapper element. */
+.sk-no-native-clear::-webkit-search-cancel-button,
+.sk-no-native-clear input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+  display: none;
+}
+
+/* ── Semantic typography ──────────────────────────────────────────────────────
+   Type styled by ROLE (purpose + location), not ad-hoc utilities. Each class
+   bundles size + weight + colour + family, so the whole app stays consistent and
+   a change lands in ONE place. See DESIGN.md §Typography.
+
+   The rules that govern the set: data VALUES are near-black ink and never below
+   12px; LABELS are muted; the two sub-12px tiers (eyebrow 10px, label 11px) are
+   chrome that *names* things — never a value. Colour still inverts for dark mode
+   automatically because the --sk-* tokens do. */
+
+/* Wrapped in @layer components (unlike the chrome classes above, which stay
+   unlayered to beat NuxtUI) so a call-site utility — a state colour like
+   text-(--sk-bad), or a size override — wins over the role's base style. */
+@layer components {
+/* Mono uppercase kicker — meta-bar eyebrow, section kickers (e.g. CD-SEM · R3). */
+.sk-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sk-ink-muted);
+}
+
+/* Field / column / caption LABEL — table headers, stat captions. Labels only. */
+.sk-label {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--sk-ink-muted);
+}
+
+/* A data VALUE the user came to read — table cells, stat text, IDs. */
+.sk-value {
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--sk-ink);
+}
+
+/* A NUMERIC value — mono + tabular figures, for numbers that update in place. */
+.sk-value-num {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+  color: var(--sk-ink);
+}
+
+/* Secondary / supporting text — helper lines, timestamps, de-emphasised meta. */
+.sk-meta {
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--sk-ink-muted);
+}
+
+/* Body copy — descriptions, empty states, help text. */
+.sk-body {
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--sk-ink);
+}
+
+/* Compact panel / card title (dense dashboards). */
+.sk-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--sk-ink);
+}
+
+/* NAVIGATE pill — the geometry and states DESIGN.md assigns to controls that
+   change the view (product tabs, feature tabs, section toggles, sub-tabs).
+   `<SkNavPill>` is the usual way to get it.
+   It is a role class rather than component-scoped CSS because the component
+   cannot serve every consumer: it hardcodes `aria-pressed`, a toggle-button
+   semantic that is invalid on `role="tab"`, so a real tablist (skewvoir's
+   Time-Series lens switch) has to own its markup. Before 2026-08-09 that
+   tablist restated the geometry in ad-hoc utilities — `h-11 px-5 text-[15px]`
+   — which meant a pill retone moved the component and quietly left the tabs
+   behind. Same rule now, different markup around it. */
+.sk-nav-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: var(--sk-r-nav);
+  border: 1px solid var(--sk-border);
+  font-family: inherit;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.sk-nav-pill--sm { padding: 6px 12px; font-size: 13px; }
+.sk-nav-pill--md { padding: 9px 16px; font-size: 14px; }
+.sk-nav-pill--lg { padding: 11px 22px; font-size: 15px; }
+
+.sk-nav-pill--rest {
+  background: transparent;
+  color: var(--sk-ink-muted);
+}
+.sk-nav-pill--rest:hover {
+  background: var(--sk-muted-surface);
+  color: var(--sk-ink);
+  border-color: var(--sk-border);
+}
+
+.sk-nav-pill--active {
+  background: var(--sk-ink);
+  color: var(--sk-ink-fg);
+  border-color: var(--sk-ink);
+  font-weight: 600;
+}
+
+.sk-nav-pill--disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.sk-nav-pill--disabled:hover {
+  background: transparent;
+  color: var(--sk-ink-muted);
+}
+
+/* A count badge sitting ON the active `--sk-ink` fill (nav pills, ink-toned
+   chips). Both colours derive from `--sk-ink-fg`, the token that already means
+   "the foreground for an ink fill" — and because that token INVERTS with the
+   theme, this one rule is correct in light and dark alike.
+   That is the whole point: the components used to carry a hand-resolved
+   `rgba(21, 17, 13, …)` — dark mode's `--sk-ink-fg` written out by hand — in a
+   `.dark` override. A literal of a token's current value is worse than an
+   arbitrary hex: it looks deliberate, but it freezes today's value, so the next
+   retone leaves the badge stale while everything around it moves. Deriving
+   from the token deletes the override entirely instead of just de-literalising
+   it. Do NOT use this for `--sk-brand` fills: brand is dark in both themes, so
+   its foreground must not invert. */
+.sk-count-on-ink {
+  background: color-mix(in srgb, var(--sk-ink-fg) 18%, transparent);
+  color: color-mix(in srgb, var(--sk-ink-fg) 92%, transparent);
+}
+
+/* "N / M" beside a table title — how many rows survive the filter.
+   Its content is DATA (two counts), so it sits at the 12px floor, not on the
+   10/11px chrome tiers. Every analytics table shipped its own copy of this in
+   zinc utilities until 2026-08-09; zinc survives only in table hovers and the
+   empty-state message. */
+.sk-count-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding-inline: 6px;
+  border-radius: var(--sk-r-sidebar);
+  background: var(--sk-muted-surface);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--sk-ink-muted);
+}
+
+/* A signal / status badge in a data table — 느림, 편중, 취약, 양호.
+   Shell only: the tone (warn / neutral) stays at the call site because it is
+   conditional on the row. The label NAMES a category rather than reporting a
+   value, so it may use the 11px micro-label tier; the radius is the badge slot
+   of the scale (8px), never Tailwind's off-scale `rounded`. */
+.sk-signal-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding-inline: 6px;
+  border-radius: var(--sk-r-chip);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+/* Card / section heading. */
+.sk-heading {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--sk-ink);
+}
+
+/* Page title (h1). */
+.sk-page-title {
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  color: var(--sk-ink);
+}
+
+/* ── Row-card idiom ───────────────────────────────────────────────────────
+   A second, LARGER tier of the roles above, for screens that trade columns
+   for rows: one record = one card, read top-to-bottom instead of scanned
+   across a dense grid. Used by CD-SEM 디바이스 통계 / 디바이스 분석.
+
+   The tiers above stay as they are — they are correct for a real table,
+   where a shared column header carries the field name and the eye compares
+   down a column. A card has no column header, so every value has to carry
+   its own label, and both have to survive being read once in passing. That
+   is why nothing here is below 13px and why labels are a full 13px rather
+   than the table's 11px: the label is now inline with the value, not
+   factored out into a header row.
+
+   Colour comes from the same --sk-* tokens as the table tiers, so light and
+   dark invert automatically and no new hue enters the system. */
+
+/* Card headline — the identifier the card is ABOUT (lot_cd, recipe_id).
+   Mono because it is a machine identifier the user matches character by
+   character against a terminal or a spreadsheet. */
+.sk-card-id {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+  color: var(--sk-ink);
+}
+
+/* Prose ON a card — ctn_desc, oper_desc. Full sentences, never truncated:
+   1.45 leading because Korean at 15px needs the extra room between lines. */
+.sk-card-desc {
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.45;
+  color: var(--sk-ink);
+  text-wrap: pretty;
+}
+
+/* Inline field label on a card's meta line ("위반", "판정 범위"). Human
+   words, sans, subtle — it names the number sitting next to it. */
+.sk-field-label {
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--sk-ink-subtle);
+}
+
+/* The number that label points at. Mono + tabular so a column of them still
+   lines up even though there is no column. */
+.sk-field-value {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  color: var(--sk-ink-muted);
+}
+
+/* A raw BACKEND FIELD NAME shown to the user (prod_catg_cd, avail_recipe,
+   bucket). The one intentional sub-14px tier on a card: it stays mono 13px
+   so it reads as "the column this maps to in the DB", visually separate
+   from the Korean label a person actually reads. */
+.sk-field-name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--sk-ink-subtle);
+}
+
+/* Title of a panel that holds cards — sits above the card stack, one step
+   below .sk-heading (18px) and well above the dense .sk-title (13px). */
+.sk-panel-title {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: -0.005em;
+  color: var(--sk-ink);
+}
+
+/* Footnote / caption under a card stack. The floor of the card idiom —
+   13px, the same size as a field label, because a caveat the user must be
+   able to act on ("합성값입니다") is not decoration. */
+.sk-caption {
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--sk-ink-muted);
+  text-wrap: pretty;
+}
+
+/* Short guidance beside a panel title ("체크박스로 여러 개 선택"). Reads at the
+   same 14px as a card value but muted, so it steps back without shrinking —
+   it is an instruction the user follows once, not chrome. */
+.sk-hint {
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--sk-ink-muted);
+}
+
+/* Status BADGE — the short tag beside a card headline (health, stage, bucket,
+   oper_id, category). Geometry and type only; the caller supplies the colour,
+   either as a utility pair or as an inline style from healthTokens.
+   Separating those is what lets one badge carry a health tint and the next a
+   neutral surface without either restating the size.
+
+   This exists for the same reason CHIP_BASE does in utils/chipClass.ts, and
+   it lives in CSS rather than beside it because a badge's colour never needs
+   a JS branch the way an active/inactive chip's does. */
+.sk-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* One step up, for badges sitting beside the 22px lot_cd in a detail header
+   rather than the 18px one on a card. Compose: `sk-badge sk-badge-lg`. */
+.sk-badge-lg {
+  height: 26px;
+  font-size: 14px;
+}
+
+/* FAB tag — names which fab a recipe/alarm row belongs to. This is
+   provenance, not a filter: per DESIGN.md's category-tag rule, terracotta
+   (`--sk-brand`) is reserved for things that narrow the data, so a fab tag
+   never takes the brand tint even where it sits beside a `sk-chip`. Neutral
+   surface + soft border, same idiom everywhere a fab_name is echoed on a
+   row. */
+.sk-fab-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: var(--sk-r-chip);
+  background: var(--sk-muted-surface);
+  border: 1px solid var(--sk-border-soft);
+  color: var(--sk-ink-muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  font-family: var(--font-sans);
+}
+} /* @layer components */
+
+/* Liveness halo on the backend-health dot — a 1.6s outward fade. The halo
+   uses currentColor + opacity rather than a tinted background so a single
+   keyframe works for ok/warn/bad. */
+@keyframes sk-pulse {
+  0%   { transform: scale(1);   opacity: 0.55; }
+  70%  { transform: scale(2.6); opacity: 0;    }
+  100% { transform: scale(2.6); opacity: 0;    }
+}
