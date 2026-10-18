@@ -18,6 +18,8 @@ const recipeExists = (t: Checked, r: Recipe) => t.recipe_exists.some(e => e.idw 
 const idwExists = (t: Checked, r: Recipe) => (t.idw_exists ?? []).includes(r.idw)
 // 대상에 `.idw` 가 이미 있으면 그것을 쓰는 레시피도 덮어쓰기 허락이 필요합니다(스펙 "사전 점검과 확인").
 const exists = (t: Checked, r: Recipe) => recipeExists(t, r) || idwExists(t, r)
+// 허락 하나가 그 쌍의 `.idp`·raw 와 공유 `.idw` 를 함께 덮으므로, `.idw` 가 있으면 늘 이름을 밝힙니다.
+const idwNote = (t: Checked, r: Recipe) => !idwExists(t, r) ? '' : `${recipeExists(t, r) ? '와 그것이' : '가'} 쓰는 ${r.idw}.idw`
 
 const readable = computed(() => props.check.targets.filter((t): t is Checked => !('error' in t)))
 const unreadable = computed(() => props.check.targets.filter((t): t is Failed => 'error' in t))
@@ -133,7 +135,7 @@ function confirm() {
               :value="key(t.eqp, r)"
             >
             <span class="font-mono">{{ cls }}/{{ r.idw }}/{{ r.idp }}</span>
-            {{ recipeExists(t, r) ? '' : `가 쓰는 ${r.idw}.idw` }} 이(가) 이미 있습니다. 덮어쓰기
+            {{ idwNote(t, r) }} 이(가) 이미 있습니다. 덮어쓰기
             (허락하지 않으면 이 레시피는 이 장비에서 빠집니다)
           </label>
         </div>

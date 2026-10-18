@@ -43,29 +43,31 @@ def test_the_idw_shows_under_every_recipe_using_it_but_counts_once(make, fleet):
     assert idw_rows == [[{"path": IDW, "state": "verified", "reason": None, "temp_path": None}]] * 2
 
 
-def test_an_existing_idw_is_replaced_when_any_pair_using_it_may_overwrite(make, fleet):
-    fleet["6MCDE305"].add(IDW, b"OLD IDW", T)
+def test_an_existing_idw_is_replaced_only_on_the_target_that_gave_permission(make, fleet):
+    for e in TARGETS:
+        fleet[e].add(IDW, b"OLD IDW", T)
     app, c = make()
-    job_id = start(c, targets=("6MCDE305",), include_idw=True,
-                   overwrite=[{"eqp": "6MCDE305", "idw": "W1", "idp": "P2"}])
+    job_id = start(c, include_idw=True, overwrite=[
+        {"eqp": "6MCDE305", "idw": "W1", "idp": "P1"}, {"eqp": "6MCDE305", "idw": "W1", "idp": "P2"}])
     run_until_idle(app)
 
-    assert c.get(f"/api/jobs/{job_id}").json["file_counts"] == counts(verified=6)
+    refused, allowed = c.get(f"/api/jobs/{job_id}").json["tree"]
+    assert (allowed["eqp"], allowed["counts"]) == ("6MCDE305", counts(verified=6))
+    assert (refused["eqp"], refused["counts"]) == ("4CCD6701", counts(failed=6))
     assert recipe_files(fleet["6MCDE305"])[IDW] == b"IDW"
+    assert recipe_files(fleet["4CCD6701"]) == {IDW: b"OLD IDW"}
 
 
-def test_an_idw_that_appeared_without_permission_stays_and_only_that_file_fails(make, fleet):
+def test_an_idw_that_appeared_without_permission_fails_every_pair_using_it(make, fleet):
     fleet["6MCDE305"].add(IDW, b"OLD IDW", T)
     app, c = make()
     job_id = start(c, targets=("6MCDE305",), include_idw=True)
     run_until_idle(app)
 
     job = c.get(f"/api/jobs/{job_id}").json
-    assert job["file_counts"] == counts(verified=5, failed=1)
-    assert job["problems"] == [
-        {"eqp": "6MCDE305", "path": IDW, "state": "failed", "reason": "확인 뒤 대상에 생김", "temp_path": None}
-    ]
-    assert recipe_files(fleet["6MCDE305"])[IDW] == b"OLD IDW"
+    assert job["file_counts"] == counts(failed=6)
+    assert {(p["eqp"], p["reason"]) for p in job["problems"]} == {("6MCDE305", "확인 뒤 대상에 생김")}
+    assert recipe_files(fleet["6MCDE305"]) == {IDW: b"OLD IDW"}
 
 
 def test_a_requested_idw_missing_on_the_source_blocks_the_job(make, fleet):

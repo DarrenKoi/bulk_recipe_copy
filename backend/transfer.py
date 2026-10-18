@@ -55,10 +55,12 @@ def _names(ftp, remote_dir: str, deadline: float) -> set[str] | None:
     return None
 
 
-def _recipe_present(ftp, class_name: str, idw: str, idp: str | None, deadline: float) -> bool:
-    """idp 가 None 이면 공유 `.idw` 를 봅니다."""
+def _recipe_present(ftp, class_name: str, idw: str, idp: str | None, deadline: float, with_idw: bool) -> bool:
+    """대상에 레시피(`.idp`·raw 폴더)나, with_idw 면 공유 `.idw` 가 있는지. idp 가 None 이면 `.idw` 만 봅니다."""
+    if (with_idw or idp is None) and f"{idw}.idw" in (_names(ftp, layout.data_dir(class_name), deadline) or set()):
+        return True
     if idp is None:
-        return f"{idw}.idw" in (_names(ftp, layout.data_dir(class_name), deadline) or set())
+        return False
     names = _names(ftp, layout.idw_dir(class_name, idw), deadline) or set()
     return f"{idp}.idp" in names or idp in names
 
@@ -85,19 +87,20 @@ class _Worker:
     def queue(self) -> list[tuple[tuple[str, str | None], list[str], str]]:
         """(레시피, 그 레시피의 남은 경로들, 경로)를 파일마다 한 항목씩.
 
-        공유 `.idw` 는 앞에 따로 한 항목입니다. 레시피 자리는 (idw, None) 이고, 실패해도 그 파일 하나만입니다.
+        공유 `.idw` 는 맨 뒤에 따로 한 항목이고 레시피 자리는 (idw, None) 입니다. 맨 뒤라서 쌍들의 첫 쓰기 전
+        재확인이 이 job 이 올린 `.idw` 가 아니라 원래 대상에 있던 것을 봅니다.
         """
         cls, pending = self.plan["class_name"], self.plan["pending"].get(self.eqp, [])
         out = []
-        for idw in dict.fromkeys(idw for eqp, idw, _ in self.plan["pairs"] if eqp == self.eqp):
-            if (path := layout.idw_path(cls, idw)) in pending:
-                out.append(((idw, None), [path], path))
         for eqp, idw, idp in self.plan["pairs"]:
             if eqp == self.eqp:
                 idp_path, raw = layout.idp_path(cls, idw, idp), layout.raw_dir(cls, idw, idp) + "/"
                 paths = [p for p in pending if p == idp_path or p.startswith(raw)]
                 if paths:
                     out += [((idw, idp), paths, p) for p in paths]
+        for idw in dict.fromkeys(idw for eqp, idw, _ in self.plan["pairs"] if eqp == self.eqp):
+            if (path := layout.idw_path(cls, idw)) in pending:
+                out.append(((idw, None), [path], path))
         return out
 
     def run(self) -> None:
@@ -148,6 +151,7 @@ class _Worker:
         if idp is not None:
             return (self.eqp, idw, idp) in self.plan["overwrites"]
         # 공유 `.idw`: 이 대상에서 그것을 쓰는 쌍 하나라도 덮어쓰기를 허락받았으면(스펙 "장비 작업자").
+        # 허락 없이 대상에 `.idw` 가 생겼으면 그것을 쓰는 쌍은 재확인에서 이미 빠졌고, 이 행도 재확인에서 실패합니다.
         return any(e == self.eqp and w == idw for e, w, _ in self.plan["overwrites"])
 
     def send(self, ftp, recipe: tuple[str, str | None], recipe_paths: list[str], path: str) -> None:
@@ -174,7 +178,9 @@ class _Worker:
                 self.class_seen.add(recipe)
             overwrite = self._overwrite(recipe)
             if not overwrite and recipe not in self.checked:
-                if _recipe_present(ftp, self.plan["class_name"], *recipe, self.seconds):
+                cls = self.plan["class_name"]
+                with_idw = layout.idw_path(cls, recipe[0]) in self.plan["manifest"]  # include_idw 인 job
+                if _recipe_present(ftp, cls, *recipe, self.seconds, with_idw):
                     self._end(path, "failed", _APPEARED)
                     store.fail_pending(self.db, self.job_id, _APPEARED, eqp=self.eqp, paths=recipe_paths)
                     return

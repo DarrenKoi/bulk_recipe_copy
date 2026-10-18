@@ -49,14 +49,6 @@ def _recipe_files(ftp, class_name: str, idw: str, idp: str):
         yield f
 
 
-def _idw_file(ftp, class_name: str, idw: str):
-    path = layout.idw_path(class_name, idw)
-    found = [f for f in ftp.list_details(layout.data_dir(class_name)) if f.path == path and not f.is_dir]
-    if not found:
-        raise _Missing(f"수집 오류: idw 파일이 없습니다: {path}")
-    return found[0]
-
-
 def _listing(ftp, class_name: str, recipes, include_idw: bool) -> dict:
     """(idw, idp) -> 그 레시피의 파일 목록. `.idw` 는 공유 파일이라 idw 마다 한 번, 키 (idw, None) 로."""
     out = {
@@ -64,8 +56,10 @@ def _listing(ftp, class_name: str, recipes, include_idw: bool) -> dict:
         for idw, idp in recipes
     }
     if include_idw:
+        files = {f.path: f for f in ftp.list_details(layout.data_dir(class_name)) if not f.is_dir}
         for idw in sorted({idw for idw, _ in recipes}):
-            f = _idw_file(ftp, class_name, idw)
+            if (f := files.get(layout.idw_path(class_name, idw))) is None:
+                raise _Missing(f"수집 오류: idw 파일이 없습니다: {layout.idw_path(class_name, idw)}")
             out[(idw, None)] = [(f.path, f.size, f.modified)]
     return out
 
