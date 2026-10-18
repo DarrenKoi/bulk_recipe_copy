@@ -72,6 +72,10 @@ def _raw_summary(ftp, remote_dir: str) -> tuple[int, int]:
     return len(files), sum(f.size or 0 for f in files)
 
 
+def _file_size(ftp, remote_dir: str, name: str) -> int | None:
+    return next((e.size for e in ftp.list_details(remote_dir) if e.name == name and not e.is_dir), None)
+
+
 def bounded(app: Flask, ftp) -> Bounded:
     return Bounded(ftp, app.config["BROWSE_SECONDS"], app.config["BROWSE_MAX_ENTRIES"])
 
@@ -136,8 +140,10 @@ def register_browse(app: Flask) -> None:
         def op(ftp):
             count, total = _raw_summary(ftp, layout.raw_dir(class_name, idw, idp))
             # 확인 팝업의 총 크기에 .idp 도 넣으려고 idw 폴더를 한 번 더 읽습니다. 없으면 None.
-            idp_bytes = next((e.size for e in ftp.list_details(layout.idw_dir(class_name, idw))
-                              if e.name == f"{idp}.idp" and not e.is_dir), None)
-            return {"idw": idw, "idp": idp, "file_count": count, "total_bytes": total, "idp_bytes": idp_bytes}
+            idp_bytes = _file_size(ftp, layout.idw_dir(class_name, idw), f"{idp}.idp")
+            # include_idw 일 때 쓰려고 data/ 도 한 번 읽어 .idw 크기를 같은 예산 안에서 돌려줍니다. 없으면 None.
+            idw_bytes = _file_size(ftp, layout.data_dir(class_name), f"{idw}.idw")
+            return {"idw": idw, "idp": idp, "file_count": count, "total_bytes": total,
+                    "idp_bytes": idp_bytes, "idw_bytes": idw_bytes}
 
         return browse(eqp, op)
