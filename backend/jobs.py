@@ -191,12 +191,18 @@ class Scheduler:
             }
             queue = sorted([*self.running.values(), *waiting.values()])
             start, over = scheduler.admit(queue, cap)
+            # 읽은 뒤 판정 전에 취소가 대기 job 을 차단했을 수 있습니다. 그 job 은 건너뜁니다.
             for job_id in over:
-                store.block_collection(db, job_id, "waiting", f"상한 초과: 대상 {waiting[job_id].n}대 > 스레드 상한 {cap}")
+                try:
+                    store.block_collection(db, job_id, "waiting", f"상한 초과: 대상 {waiting[job_id].n}대 > 스레드 상한 {cap}")
+                except RuntimeError:
+                    pass
             claimed = []
             for job_id in start:
                 try:
                     claimed.append(store.claim_job(db, job_id))
+                except RuntimeError:
+                    continue
                 except Exception:  # 트랜잭션이 되돌려져 이 job 과 뒤 job 은 대기로 남고 다음 판정에서 다시 봅니다.
                     self.app.logger.exception("claim of job %s failed", job_id)
                     break
@@ -411,6 +417,10 @@ def register_jobs(app: Flask) -> None:
             return error_json("finished", f"job {job_id} 은 이미 끝났습니다.", 409)
         db = app.config["DB_PATH"]
         store.request_cancel(db, job_id)
+        # 확인과 플래그 사이에 끝났을 수 있습니다. 끝난 job 에 취소 요청을 남기지 않습니다.
+        if store.get_job(db, job_id)["progress"]["finished"]:
+            store.request_cancel(db, job_id, requested=False)
+            return error_json("finished", f"job {job_id} 은 이미 끝났습니다.", 409)
         if job["collection"]["state"] == "waiting":
             try:
                 store.block_collection(db, job_id, "waiting", "취소")

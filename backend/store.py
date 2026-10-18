@@ -184,9 +184,9 @@ def finish_collection(db_path, job_id, *, manifest, manifest_hash, snapshot_dir,
         _move(conn, job_id, "collecting", "done", manifest_hash=manifest_hash, snapshot_dir=str(snapshot_dir))
 
 
-def request_cancel(db_path, job_id: int) -> None:
+def request_cancel(db_path, job_id: int, requested: bool = True) -> None:
     with connect(db_path) as conn:
-        conn.execute("UPDATE jobs SET cancel_requested = 1 WHERE id = ?", (job_id,))
+        conn.execute("UPDATE jobs SET cancel_requested = ? WHERE id = ?", (requested, job_id))
 
 
 def cancel_requested(db_path, job_id: int) -> bool:

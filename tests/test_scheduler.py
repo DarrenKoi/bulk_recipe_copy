@@ -260,3 +260,32 @@ def test_a_failed_block_record_does_not_stop_later_jobs_from_starting(make, monk
             t.join(timeout=10)
     assert c.get(f"/api/jobs/{second}").json["collection"]["state"] == "done"
     assert first not in app.config["SCHEDULER"].running
+
+
+def cancel_after_reading(monkeypatch, c, job_id):
+    """대기 job 을 읽은 직후 그 job 이 취소되는 경쟁."""
+    waiting_jobs = store.waiting_jobs
+
+    def racing(db):
+        jobs = waiting_jobs(db)
+        assert c.post(f"/api/jobs/{job_id}/cancel").status_code == 200
+        return jobs
+
+    monkeypatch.setattr(store, "waiting_jobs", racing)
+
+
+def test_a_job_cancelled_between_reading_and_claiming_is_skipped(make, monkeypatch):
+    app, c = make()
+    first, second = post(c, "S1", "T1"), post(c, "S2", "T3")
+    cancel_after_reading(monkeypatch, c, first)
+    assert [j["id"] for j in app.config["SCHEDULER"].admit()] == [second]
+    assert board(c)[first] == ("blocked", None)
+
+
+def test_an_over_cap_job_cancelled_between_reading_and_blocking_keeps_its_cancel_reason(make, monkeypatch):
+    _, c = make(max_threads=2)
+    over, ok = post(c, "S1", "T1", "T2"), post(c, "S2", "T3")
+    app, c = make(max_threads=1)  # 재기동하며 상한을 줄임
+    cancel_after_reading(monkeypatch, c, over)
+    assert [j["id"] for j in app.config["SCHEDULER"].admit()] == [ok]
+    assert c.get(f"/api/jobs/{over}").json["collection"] == {"state": "blocked", "reason": "취소"}

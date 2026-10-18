@@ -113,6 +113,42 @@ def test_a_job_cancelled_mid_transfer_finishes_the_file_in_flight_and_fails_the_
     assert snapshot(tmp_path, job_id).exists()
 
 
+def test_a_cancel_during_a_reconnect_still_verifies_the_claimed_file(app, c, fleet):
+    job_id = start(c)
+
+    # 첫 대상의 첫 파일 put 직후(검증 전) 취소하고 연결을 끊습니다. 재연결한 작업자는 잡아 둔 그 파일을 검증까지 마칩니다.
+    def cancel_and_drop(path):
+        fleet["4CCD6701"].on_download = None
+        c.post(f"/api/jobs/{job_id}/cancel")
+        raise ConnectionResetError("injected")
+
+    fleet["4CCD6701"].on_download = cancel_and_drop
+    run_until_idle(app)
+
+    job = c.get(f"/api/jobs/{job_id}").json
+    by_eqp = {t["eqp"]: t for t in job["tree"]}
+    assert by_eqp["4CCD6701"]["counts"] == counts(verified=1, failed=4)
+    assert by_eqp["6MCDE305"]["counts"] == counts(failed=5)
+    assert {p["reason"] for p in job["problems"]} == {"취소"}
+    assert job["progress"]["finished"] is True
+
+
+def test_a_cancel_racing_the_last_file_is_refused_and_leaves_no_flag(app, c, monkeypatch):
+    job_id = start(c)
+    request_cancel = store.request_cancel
+
+    def finish_first(db, jid, requested=True):
+        if requested:  # 플래그를 세우기 직전에 job 이 끝납니다.
+            run_until_idle(app)
+        request_cancel(db, jid, requested)
+
+    monkeypatch.setattr(store, "request_cancel", finish_first)
+    resp = c.post(f"/api/jobs/{job_id}/cancel")
+    assert (resp.status_code, resp.json["error"]["code"]) == (409, "finished")
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert (job["progress"]["success"], job["cancel_requested"]) == (True, False)
+
+
 def test_only_the_executor_may_cancel_or_close(app, c):
     job_id = start(c)
     other = client(app, "engineer2")
