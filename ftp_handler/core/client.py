@@ -492,17 +492,22 @@ class FtpClient:
             raise
         return True
 
-    def mkdir(self, remote_dir: str) -> None:
+    def mkdir(self, remote_dir: str, *, floor: str | None = None) -> None:
         """Create ``remote_dir`` and any missing parents (MKD, one level each).
 
         A level that already exists counts as success. MKD's refusal code for
         "exists" varies by server (550, 521), so any ``error_perm`` is checked
         by CWD into that level; if it is not an enterable directory, the
         original refusal propagates.
+
+        With ``floor`` (an ancestor of ``remote_dir``), only levels below it
+        are created: ``floor`` and its parents are never MKD'd, so a missing
+        ``floor`` makes the first MKD below it fail instead of recreating it.
         """
         parts = [p for p in remote_dir.split("/") if p]
         prefix = "/" if remote_dir.startswith("/") else ""
-        for i in range(len(parts)):
+        start = len([p for p in floor.split("/") if p]) if floor else 0
+        for i in range(start, len(parts)):
             level = prefix + "/".join(parts[: i + 1])
             try:
                 self._ftp.mkd(level)

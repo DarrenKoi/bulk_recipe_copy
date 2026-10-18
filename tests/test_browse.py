@@ -86,9 +86,9 @@ def test_class_without_recipes_is_an_empty_list(client):
 def test_recipe_detail_counts_raw_files_including_subfolders(client):
     resp = client.get("/api/tools/6MCDE301/classes/ABC_GATE/recipes/W1/P1")
     assert resp.status_code == 200
-    assert resp.json == {"idw": "W1", "idp": "P1", "file_count": 2, "total_bytes": 8}
+    assert resp.json == {"idw": "W1", "idp": "P1", "file_count": 2, "total_bytes": 8, "idp_bytes": 7}
     empty = client.get("/api/tools/6MCDE301/classes/ABC_GATE/recipes/W1/P2")
-    assert empty.json == {"idw": "W1", "idp": "P2", "file_count": 0, "total_bytes": 0}
+    assert empty.json == {"idw": "W1", "idp": "P2", "file_count": 0, "total_bytes": 0, "idp_bytes": 7}
 
 
 @pytest.mark.parametrize(
@@ -168,8 +168,9 @@ def test_entry_budget_counts_every_recipe_the_listing_returns(make_client):
 
 
 def test_a_browse_that_uses_the_budget_exactly_succeeds(make_client, fleet):
-    # 항목은 빈 하위 폴더 하나뿐이라 예산 1로 끝나야 합니다. 그 빈 폴더의 LIST는 남은 예산 0으로 돕니다.
+    # raw 폴더 항목은 빈 하위 폴더 하나(그 LIST는 남은 예산 0으로 돕니다), .idp 크기를 읽는 idw 폴더
+    # W1 은 P1.idp·P1·P2.idp·P2 넷이라 예산 5로 끝나야 합니다.
     fleet["6MCDE301"].dirs.add(layout.raw_dir("ABC_GATE", "W1", "P2") + "/empty")
-    resp = make_client(browse_max_entries=1).get("/api/tools/6MCDE301/classes/ABC_GATE/recipes/W1/P2")
+    resp = make_client(browse_max_entries=5).get("/api/tools/6MCDE301/classes/ABC_GATE/recipes/W1/P2")
     assert resp.status_code == 200
     assert resp.json["file_count"] == 0

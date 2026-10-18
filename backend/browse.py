@@ -135,6 +135,9 @@ def register_browse(app: Flask) -> None:
     def recipe(eqp, class_name, idw, idp):
         def op(ftp):
             count, total = _raw_summary(ftp, layout.raw_dir(class_name, idw, idp))
-            return {"idw": idw, "idp": idp, "file_count": count, "total_bytes": total}
+            # 확인 팝업의 총 크기에 .idp 도 넣으려고 idw 폴더를 한 번 더 읽습니다. 없으면 None.
+            idp_bytes = next((e.size for e in ftp.list_details(layout.idw_dir(class_name, idw))
+                              if e.name == f"{idp}.idp" and not e.is_dir), None)
+            return {"idw": idw, "idp": idp, "file_count": count, "total_bytes": total, "idp_bytes": idp_bytes}
 
         return browse(eqp, op)

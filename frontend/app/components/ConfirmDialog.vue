@@ -26,27 +26,35 @@ const pairs = computed<Pair[]>(() => readable.value
     .filter(r => !exists(t, r) || overwrite.value.includes(key(t.eqp, r)))
     .map(r => ({ eqp: t.eqp, ...r }))))
 
-// 파일 수·크기는 수집 전이라 서버가 모릅니다. 고른 레시피의 raw 폴더 요약 API 로 셉니다.
-type Summary = { file_count: number, total_bytes: number }
-const summaries = ref<Record<string, Summary | null>>({})
+// 파일 수·크기는 수집 전이라 서버가 모릅니다. 고른 레시피마다 원본의 요약 API(raw 폴더 + .idp 크기)로 셉니다.
+type Summary = { file_count: number, total_bytes: number, idp_bytes: number | null }
+// 레시피 키 -> 요약, 실패 사유(string), 또는 아직 없음(undefined)
+const summaries = ref<Record<string, Summary | string>>({})
+const rkey = (r: Recipe) => `${r.idw}/${r.idp}`
 const api = (...parts: string[]) => `/api/tools/${[props.eqp, ...parts].map(encodeURIComponent).join('/')}`
-onMounted(() => {
-  for (const r of props.recipes) {
-    $fetch<Summary>(api('classes', props.cls, 'recipes', r.idw, r.idp))
-      .then((s) => { summaries.value[`${r.idw}/${r.idp}`] = s })
-      .catch(() => { summaries.value[`${r.idw}/${r.idp}`] = null })
-  }
-})
+function load(r: Recipe) {
+  delete summaries.value[rkey(r)]
+  $fetch<Summary>(api('classes', props.cls, 'recipes', r.idw, r.idp))
+    .then((s) => {
+      summaries.value[rkey(r)] = s.idp_bytes === null ? '원본에서 .idp 를 찾지 못했습니다.' : s
+    })
+    .catch((e) => { summaries.value[rkey(r)] = e?.data?.error?.message ?? e?.message ?? '조회 실패' })
+}
+onMounted(() => props.recipes.forEach(load))
+
+const needed = computed(() => props.recipes.filter(r => pairs.value.some(p => rkey(p) === rkey(r))))
+const failed = computed(() => needed.value.filter(r => typeof summaries.value[rkey(r)] === 'string'))
+// 남은 쌍의 요약이 모두 와야 실행할 수 있습니다.
+const ready = computed(() => needed.value.every(r => typeof summaries.value[rkey(r)] === 'object'))
 
 const scale = computed(() => {
-  const all = pairs.value.map(p => summaries.value[`${p.idw}/${p.idp}`])
-  const known = all.every(s => s)
+  const all = pairs.value.map(p => summaries.value[rkey(p)] as Summary)
   return {
     tools: new Set(pairs.value.map(p => p.eqp)).size,
-    recipes: new Set(pairs.value.map(p => `${p.idw}/${p.idp}`)).size,
-    // raw 폴더 파일 + .idp 1개. 크기는 raw 폴더 기준(.idp 크기는 목록에 없음).
-    files: known ? all.reduce((n, s) => n + s!.file_count + 1, 0) : null,
-    bytes: known ? all.reduce((n, s) => n + s!.total_bytes, 0) : null
+    recipes: needed.value.length,
+    // raw 폴더 파일 + .idp 1개
+    files: ready.value ? all.reduce((n, s) => n + s.file_count + 1, 0) : null,
+    bytes: ready.value ? all.reduce((n, s) => n + s.total_bytes + s.idp_bytes!, 0) : null
   }
 })
 
@@ -123,6 +131,22 @@ function confirm() {
           </label>
         </div>
         <p
+          v-for="r in failed"
+          :key="rkey(r)"
+          class="sk-body flex items-center gap-2 text-(--sk-bad)"
+        >
+          <span><span class="font-mono">{{ cls }}/{{ rkey(r) }}</span> 의 파일 수·크기를 읽지 못했습니다. {{ summaries[rkey(r)] }}</span>
+          <UButton
+            size="xs"
+            color="neutral"
+            variant="outline"
+            icon="i-lucide-rotate-cw"
+            @click="load(r)"
+          >
+            다시 조회
+          </UButton>
+        </p>
+        <p
           v-for="t in unreadable"
           :key="t.eqp"
           class="sk-body text-(--sk-bad)"
@@ -135,7 +159,7 @@ function confirm() {
       <div class="flex w-full flex-wrap items-center gap-3">
         <span class="sk-meta">
           장비 {{ scale.tools }}대 · 레시피 {{ scale.recipes }}개 ·
-          파일 {{ scale.files ?? '?' }}개 · 총 {{ scale.bytes === null ? '?' : size(scale.bytes) }}(raw 폴더 기준)
+          파일 {{ scale.files ?? '?' }}개 · 총 {{ scale.bytes === null ? '?' : size(scale.bytes) }}
         </span>
         <UButton
           class="ml-auto"
@@ -146,7 +170,7 @@ function confirm() {
           취소
         </UButton>
         <UButton
-          :disabled="!pairs.length"
+          :disabled="!pairs.length || !ready"
           :loading="sending"
           icon="i-lucide-play"
           @click="confirm"

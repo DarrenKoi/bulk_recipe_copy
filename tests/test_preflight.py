@@ -137,3 +137,33 @@ def test_choices_outside_the_jobs_own_selection_are_refused(make, over, code):
     resp = c.post("/api/jobs", json=SELECTION | over)
     assert (resp.status_code, resp.json["error"]["code"]) == (400, code)
     assert c.get("/api/jobs").json == {"jobs": []}
+
+
+def test_a_class_folder_removed_mid_job_is_not_recreated_without_permission(make, fleet):
+    # 허락 없는 job. P1 을 다 보낸 뒤 누군가 대상의 class 폴더를 지우면, P2 는 폴더를 다시 만들지 않고 실패합니다.
+    target = fleet["6MCDE305"]
+    target.dirs.add(layout.data_dir("ABC_GATE"))
+    p1_paths = {P1_IDP, f"{P1_RAW_DIR}/a.tif", f"{P1_RAW_DIR}/sub/b.csv"}
+    seen, download = set(), target.download
+
+    def download_then_remove_class(path, **kw):
+        data = download(path, **kw)
+        seen.add(path)
+        if seen == p1_paths:
+            cls = layout.class_dir("ABC_GATE")
+            target.files = {p: v for p, v in target.files.items() if not p.startswith(cls)}
+            target.dirs = {d for d in target.dirs if not d.startswith(cls)}
+        return data
+
+    target.download = download_then_remove_class
+    app, c = make()
+    job_id = c.post("/api/jobs", json=SELECTION | {"targets": ["6MCDE305"]}).json["id"]
+    run_until_idle(app)
+
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert job["file_counts"] == counts(verified=3, failed=2)
+    assert sorted((p["path"], p["reason"]) for p in job["problems"]) == [
+        (P2_IDP, "대상에 class 폴더 없음"),
+        (f"{layout.raw_dir('ABC_GATE', 'W1', 'P2')}/c.tif", "대상에 class 폴더 없음"),
+    ]
+    assert target._all_dirs() == {"/", "/HITACHI", "/HITACHI/DEVICE", layout.ROOT}

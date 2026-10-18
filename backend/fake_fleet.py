@@ -119,8 +119,10 @@ class FakeTool:
             raise TransferTooLarge(f"{remote_path} exceeds {max_bytes} bytes")
         return data
 
-    def mkdir(self, remote_dir: str) -> None:
+    def mkdir(self, remote_dir: str, *, floor: str | None = None) -> None:
         self._op()
+        if floor is not None and floor not in self._all_dirs():
+            raise error_perm(f"550 {floor}: No such file or directory")
         for d in [remote_dir, *map(str, PurePosixPath(remote_dir).parents)]:
             if d in self.files:
                 raise error_perm(f"550 {d}: File exists")

@@ -23,19 +23,38 @@ const recipes = computed(() => props.picked.map((rid) => {
   const [idw, idp] = rid.split('/')
   return { idw: idw!, idp: idp! }
 }))
-const selection = () => ({ source_eqp: props.eqp, class_name: props.cls, recipes: recipes.value, targets: targets.value })
+type Selection = { source_eqp: string, class_name: string, recipes: { idw: string, idp: string }[], targets: string[] }
+// 점검을 시작할 때 선택을 복사해 고정합니다. 점검·팝업·job 생성이 모두 이 사본을 씁니다.
+const frozen = shallowRef<Selection | null>(null) // shallow: 아래 `!== sel` 비교가 프록시가 아닌 원본끼리 되도록
 const check = ref<Preflight | null>(null)
 const confirming = ref(false)
 const reason = (e: any) => e?.data?.error?.message ?? e?.message
 
+// 점검 중이거나 팝업이 열린 동안 선택이 바뀌면 그 점검 결과는 버리고 다시 점검하게 합니다.
+// 문자열로 비교합니다. 부모가 같은 내용의 새 배열을 내려줘도 바뀐 것으로 보지 않게.
+watch(() => JSON.stringify([props.eqp, props.cls, props.picked, targets.value]), () => {
+  if (!frozen.value || !(sending.value || confirming.value)) return
+  frozen.value = null
+  check.value = null
+  confirming.value = false
+  failure.value = '선택이 바뀌어 사전 점검을 다시 해야 합니다.'
+})
+
 // 실행은 사전 점검 → 확인 팝업 → job 생성입니다. 팝업의 선택을 그대로 보냅니다.
 async function run() {
+  const sel: Selection = { source_eqp: props.eqp, class_name: props.cls, recipes: recipes.value.map(r => ({ ...r })), targets: [...targets.value] }
+  frozen.value = sel
+  check.value = null
   sending.value = true
   failure.value = null
   try {
-    check.value = await $fetch<Preflight>('/api/preflight', { method: 'POST', body: selection() })
+    const result = await $fetch<Preflight>('/api/preflight', { method: 'POST', body: sel })
+    if (frozen.value !== sel) return // 대기 중 선택이 바뀜
+    check.value = result
     confirming.value = true
   } catch (e) {
+    if (frozen.value !== sel) return
+    frozen.value = null
     failure.value = `사전 점검을 하지 못했습니다. ${reason(e)}`
   } finally {
     sending.value = false
@@ -43,13 +62,18 @@ async function run() {
 }
 
 async function create(choice: Choice) {
+  const sel = frozen.value
+  if (!sel) return
   sending.value = true
   try {
-    const job = await $fetch<{ id: number }>('/api/jobs', { method: 'POST', body: { ...selection(), ...choice } })
+    const job = await $fetch<{ id: number }>('/api/jobs', { method: 'POST', body: { ...sel, ...choice } })
+    frozen.value = null
+    failure.value = null
     confirming.value = false
     targets.value = []
     emit('created', job.id)
   } catch (e) {
+    frozen.value = null
     confirming.value = false
     failure.value = `job을 만들지 못했습니다. ${reason(e)}`
   } finally {
@@ -133,11 +157,11 @@ async function create(choice: Choice) {
       >{{ failure }}</span>
     </div>
     <ConfirmDialog
-      v-if="check && confirming"
+      v-if="frozen && check && confirming"
       v-model:open="confirming"
-      :eqp="eqp"
-      :cls="cls"
-      :recipes="recipes"
+      :eqp="frozen.source_eqp"
+      :cls="frozen.class_name"
+      :recipes="frozen.recipes"
       :check="check"
       :sending="sending"
       @confirm="create"

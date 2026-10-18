@@ -133,6 +133,18 @@ def test_mkdir_existing_dir_is_success(ftp, tmp_path):
     assert ftp.home() == "/"
 
 
+def test_mkdir_never_creates_the_floor_or_above(ftp, tmp_path):
+    (tmp_path / "CLS" / "data").mkdir(parents=True)
+    ftp.mkdir("/CLS/data/W1/P1", floor="/CLS/data")
+    assert _files(tmp_path) == ["CLS", "CLS/data", "CLS/data/W1", "CLS/data/W1/P1"]
+    (tmp_path / "CLS" / "data" / "W1" / "P1").rmdir()
+    (tmp_path / "CLS" / "data" / "W1").rmdir()
+    (tmp_path / "CLS" / "data").rmdir()
+    with pytest.raises(error_perm, match="^550"):
+        ftp.mkdir("/CLS/data/W1", floor="/CLS/data")
+    assert _files(tmp_path) == ["CLS"]
+
+
 def test_mkdir_over_existing_file_raises(ftp, tmp_path):
     (tmp_path / "CLS").write_bytes(b"x")
     with pytest.raises(error_perm, match="^550"):
