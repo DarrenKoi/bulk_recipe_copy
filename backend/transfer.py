@@ -55,7 +55,10 @@ def _names(ftp, remote_dir: str, deadline: float) -> set[str] | None:
     return None
 
 
-def _recipe_present(ftp, class_name: str, idw: str, idp: str, deadline: float) -> bool:
+def _recipe_present(ftp, class_name: str, idw: str, idp: str | None, deadline: float) -> bool:
+    """idp 가 None 이면 공유 `.idw` 를 봅니다."""
+    if idp is None:
+        return f"{idw}.idw" in (_names(ftp, layout.data_dir(class_name), deadline) or set())
     names = _names(ftp, layout.idw_dir(class_name, idw), deadline) or set()
     return f"{idp}.idp" in names or idp in names
 
@@ -79,10 +82,16 @@ class _Worker:
         self.claimed: str | None = None
         self.put_done = False
 
-    def queue(self) -> list[tuple[tuple[str, str], list[str], str]]:
-        """(레시피, 그 레시피의 남은 경로들, 경로)를 파일마다 한 항목씩."""
+    def queue(self) -> list[tuple[tuple[str, str | None], list[str], str]]:
+        """(레시피, 그 레시피의 남은 경로들, 경로)를 파일마다 한 항목씩.
+
+        공유 `.idw` 는 앞에 따로 한 항목입니다. 레시피 자리는 (idw, None) 이고, 실패해도 그 파일 하나만입니다.
+        """
         cls, pending = self.plan["class_name"], self.plan["pending"].get(self.eqp, [])
         out = []
+        for idw in dict.fromkeys(idw for eqp, idw, _ in self.plan["pairs"] if eqp == self.eqp):
+            if (path := layout.idw_path(cls, idw)) in pending:
+                out.append(((idw, None), [path], path))
         for eqp, idw, idp in self.plan["pairs"]:
             if eqp == self.eqp:
                 idp_path, raw = layout.idp_path(cls, idw, idp), layout.raw_dir(cls, idw, idp) + "/"
@@ -134,7 +143,14 @@ class _Worker:
     def _end(self, path: str, to: str, reason: str | None = None, temp_path: str | None = None) -> None:
         store.move_file(self.db, self.job_id, self.eqp, path, "in_progress", to, reason=reason, temp_path=temp_path)
 
-    def send(self, ftp, recipe: tuple[str, str], recipe_paths: list[str], path: str) -> None:
+    def _overwrite(self, recipe: tuple[str, str | None]) -> bool:
+        idw, idp = recipe
+        if idp is not None:
+            return (self.eqp, idw, idp) in self.plan["overwrites"]
+        # 공유 `.idw`: 이 대상에서 그것을 쓰는 쌍 하나라도 덮어쓰기를 허락받았으면(스펙 "장비 작업자").
+        return any(e == self.eqp and w == idw for e, w, _ in self.plan["overwrites"])
+
+    def send(self, ftp, recipe: tuple[str, str | None], recipe_paths: list[str], path: str) -> None:
         if path != self.claimed:
             if not store.move_file(self.db, self.job_id, self.eqp, path, "pending", "in_progress"):
                 return  # 이미 실패 처리됨(재확인, 스냅샷 손상)
@@ -156,7 +172,7 @@ class _Worker:
                     store.fail_pending(self.db, self.job_id, _NO_CLASS, eqp=self.eqp)
                     return
                 self.class_seen.add(recipe)
-            overwrite = (self.eqp, *recipe) in self.plan["overwrites"]
+            overwrite = self._overwrite(recipe)
             if not overwrite and recipe not in self.checked:
                 if _recipe_present(ftp, self.plan["class_name"], *recipe, self.seconds):
                     self._end(path, "failed", _APPEARED)
@@ -185,7 +201,7 @@ class _Worker:
         try:
             # 레시피의 끝 file 을 닫기 전에 셉니다. 그래야 "file 이 다 끝남"(job finished, 화면 폴링 종료)이
             # "집계도 시도함"을 뜻합니다. 끝 file 이 다른 길로 끝나면 집계는 모름으로 남습니다.
-            if path == recipe_paths[-1]:
+            if path == recipe_paths[-1] and recipe[1] is not None:
                 self._count_target_only(ftp, recipe)
         finally:
             self._end(path, *(("verified",) if ok else ("failed", "해시 불일치")))

@@ -7,6 +7,8 @@ const props = defineProps<{ eqp: string, cls: string, picked: string[] }>()
 const emit = defineEmits<{ created: [id: number] }>()
 
 const targets = ref<string[]>([])
+// 공유 파일을 모르고 덮지 않도록 기본은 끕니다.
+const includeIdw = ref(false)
 const query = ref('')
 const sending = ref(false)
 const failure = ref<string | null>(null)
@@ -23,7 +25,7 @@ const recipes = computed(() => props.picked.map((rid) => {
   const [idw, idp] = rid.split('/')
   return { idw: idw!, idp: idp! }
 }))
-type Selection = { source_eqp: string, class_name: string, recipes: { idw: string, idp: string }[], targets: string[] }
+type Selection = { source_eqp: string, class_name: string, recipes: { idw: string, idp: string }[], targets: string[], include_idw: boolean }
 // 점검을 시작할 때 선택을 복사해 고정합니다. 점검·팝업·job 생성이 모두 이 사본을 씁니다.
 const frozen = shallowRef<Selection | null>(null) // shallow: 아래 `!== sel` 비교가 프록시가 아닌 원본끼리 되도록
 const check = ref<Preflight | null>(null)
@@ -32,7 +34,7 @@ const reason = (e: any) => e?.data?.error?.message ?? e?.message
 
 // 점검 중이거나 팝업이 열린 동안 선택이 바뀌면 그 점검 결과는 버리고 다시 점검하게 합니다.
 // 문자열로 비교합니다. 부모가 같은 내용의 새 배열을 내려줘도 바뀐 것으로 보지 않게.
-watch(() => JSON.stringify([props.eqp, props.cls, props.picked, targets.value]), () => {
+watch(() => JSON.stringify([props.eqp, props.cls, props.picked, targets.value, includeIdw.value]), () => {
   if (!frozen.value || !(sending.value || confirming.value)) return
   frozen.value = null
   check.value = null
@@ -42,7 +44,7 @@ watch(() => JSON.stringify([props.eqp, props.cls, props.picked, targets.value]),
 
 // 실행은 사전 점검 → 확인 팝업 → job 생성입니다. 팝업의 선택을 그대로 보냅니다.
 async function run() {
-  const sel: Selection = { source_eqp: props.eqp, class_name: props.cls, recipes: recipes.value.map(r => ({ ...r })), targets: [...targets.value] }
+  const sel: Selection = { source_eqp: props.eqp, class_name: props.cls, recipes: recipes.value.map(r => ({ ...r })), targets: [...targets.value], include_idw: includeIdw.value }
   frozen.value = sel
   check.value = null
   sending.value = true
@@ -142,6 +144,18 @@ async function create(choice: Choice) {
       </tbody>
     </table>
 
+    <label class="sk-body flex items-center gap-2 text-(--sk-ink)">
+      <input
+        v-model="includeIdw"
+        type="checkbox"
+      >
+      .idw 포함
+      <span
+        v-if="includeIdw"
+        class="text-(--sk-warn)"
+      >같은 idw를 쓰는 다른 레시피도 영향받음</span>
+    </label>
+
     <div class="flex items-center gap-3">
       <UButton
         :disabled="!picked.length || !targets.length"
@@ -162,6 +176,7 @@ async function create(choice: Choice) {
       :eqp="frozen.source_eqp"
       :cls="frozen.class_name"
       :recipes="frozen.recipes"
+      :include-idw="frozen.include_idw"
       :check="check"
       :sending="sending"
       @confirm="create"

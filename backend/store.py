@@ -109,12 +109,12 @@ def init(db_path: Path) -> None:
         conn.executescript(_SCHEMA)
 
 
-def create_job(db_path, *, executor, source_eqp, class_name, pairs, overwrites=(), create_class=()) -> int:
+def create_job(db_path, *, executor, source_eqp, class_name, pairs, overwrites=(), create_class=(), include_idw=False) -> int:
     """`pairs`·`overwrites` 는 (대상 eqp, idw, idp) 목록, `create_class` 는 class 폴더를 만들어도 되는 대상입니다."""
     with connect(db_path) as conn, _tx(conn):
         job_id = conn.execute(
-            "INSERT INTO jobs (executor, created_at, source_eqp, class_name) VALUES (?, ?, ?, ?)",
-            (executor, datetime.now().astimezone().isoformat(timespec="seconds"), source_eqp, class_name),
+            "INSERT INTO jobs (executor, created_at, source_eqp, class_name, include_idw) VALUES (?, ?, ?, ?, ?)",
+            (executor, datetime.now().astimezone().isoformat(timespec="seconds"), source_eqp, class_name, include_idw),
         ).lastrowid
         conn.executemany(
             "INSERT INTO job_targets (job_id, eqp, may_create_class) VALUES (?, ?, ?)",
@@ -169,7 +169,8 @@ def claim_next_waiting(db_path):
 def finish_collection(db_path, job_id, *, manifest, manifest_hash, snapshot_dir, pairs, recipe_paths) -> None:
     """manifest·file 행(쌍마다 대상 × 그 레시피의 파일, pending)·수집 완료를 한 트랜잭션으로 기록합니다.
 
-    `recipe_paths` 는 (idw, idp) -> 그 레시피의 원격 경로 목록입니다.
+    `recipe_paths` 는 (idw, idp) -> 그 레시피의 원격 경로 목록입니다. 공유 `.idw` 처럼 여러 레시피에
+    든 경로도 대상마다 file 행은 하나입니다.
     """
     with connect(db_path) as conn, _tx(conn):
         conn.executemany(
@@ -178,7 +179,7 @@ def finish_collection(db_path, job_id, *, manifest, manifest_hash, snapshot_dir,
         )
         conn.executemany(
             "INSERT INTO files (job_id, target_eqp, path) VALUES (?, ?, ?)",
-            [(job_id, eqp, p) for eqp, idw, idp in pairs for p in recipe_paths[(idw, idp)]],
+            dict.fromkeys((job_id, eqp, p) for eqp, idw, idp in pairs for p in recipe_paths[(idw, idp)]),
         )
         _move(conn, job_id, "collecting", "done", manifest_hash=manifest_hash, snapshot_dir=str(snapshot_dir))
 

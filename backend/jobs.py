@@ -31,17 +31,16 @@ class _Blocked(Exception):
     """메시지가 그대로 공개 차단 사유가 되는 수집 오류."""
 
 
-class _MissingIdp(_Blocked):
-    pass
+class _Missing(_Blocked):
+    """레시피의 `.idp` 나 요청한 `.idw` 가 원본에 없습니다."""
 
 
 def _recipe_files(ftp, class_name: str, idw: str, idp: str):
     """레시피의 파일 목록(경로·크기·mtime). 받을 파일 목록이자 변경 탐지의 비교 대상입니다."""
-    # include_idw 는 아직 늘 0 입니다. `.idw` 는 티켓 07.
     idp_file = layout.idp_path(class_name, idw, idp)
     found = [f for f in ftp.list_details(layout.idw_dir(class_name, idw)) if f.path == idp_file and not f.is_dir]
     if not found:
-        raise _MissingIdp(f"수집 오류: 레시피 파일이 없습니다: {idp_file}")
+        raise _Missing(f"수집 오류: 레시피 파일이 없습니다: {idp_file}")
     yield found[0]
     raw = layout.raw_dir(class_name, idw, idp)
     for f in walk_files(ftp, raw):
@@ -50,11 +49,25 @@ def _recipe_files(ftp, class_name: str, idw: str, idp: str):
         yield f
 
 
-def _listing(ftp, class_name: str, recipes) -> dict:
-    return {
+def _idw_file(ftp, class_name: str, idw: str):
+    path = layout.idw_path(class_name, idw)
+    found = [f for f in ftp.list_details(layout.data_dir(class_name)) if f.path == path and not f.is_dir]
+    if not found:
+        raise _Missing(f"수집 오류: idw 파일이 없습니다: {path}")
+    return found[0]
+
+
+def _listing(ftp, class_name: str, recipes, include_idw: bool) -> dict:
+    """(idw, idp) -> 그 레시피의 파일 목록. `.idw` 는 공유 파일이라 idw 마다 한 번, 키 (idw, None) 로."""
+    out = {
         (idw, idp): sorted((f.path, f.size, f.modified) for f in _recipe_files(ftp, class_name, idw, idp))
         for idw, idp in recipes
     }
+    if include_idw:
+        for idw in sorted({idw for idw, _ in recipes}):
+            f = _idw_file(ftp, class_name, idw)
+            out[(idw, None)] = [(f.path, f.size, f.modified)]
+    return out
 
 
 def _save(app: Flask, snap: Path, path: str, data: bytes) -> None:
@@ -98,6 +111,7 @@ def _collect(app: Flask, job: dict) -> None:
     snap = root / str(job["id"])
     shutil.rmtree(snap, ignore_errors=True)
     recipes = sorted({(idw, idp) for _, idw, idp in job["pairs"]})
+    include_idw = bool(job["include_idw"])
     try:
         cap = app.config["SNAPSHOT_CAP_BYTES"]
         try:
@@ -113,7 +127,7 @@ def _collect(app: Flask, job: dict) -> None:
             # 두 목록 사이에 크기·mtime이 같게 바뀐 파일(LIST mtime은 분 단위일 수 있음)은 못 잡습니다.
             for _ in range(2):
                 shutil.rmtree(snap, ignore_errors=True)
-                before = _listing(ftp, job["class_name"], recipes)
+                before = _listing(ftp, job["class_name"], recipes, include_idw)
                 budget, manifest = left, []
                 for files in before.values():
                     for path, _, _ in files:
@@ -125,14 +139,18 @@ def _collect(app: Flask, job: dict) -> None:
                         _save(app, snap, path, data)
                         manifest.append((path, len(data), hashlib.sha256(data).hexdigest()))
                 try:
-                    after = _listing(ftp, job["class_name"], recipes)
-                except _MissingIdp:  # 편집기가 .idp를 교체하는 중이면 한 번 더 수집합니다.
+                    after = _listing(ftp, job["class_name"], recipes, include_idw)
+                except _Missing:  # 편집기가 .idp를 교체하는 중이면 한 번 더 수집합니다.
                     after = None
                 if after == before:
                     break
             else:
                 raise _Blocked("원본이 바뀌는 중")
-        recipe_paths = {r: [path for path, _, _ in files] for r, files in before.items()}
+        # `.idw` 도 그것을 쓰는 레시피의 경로로 넣습니다. file 행은 대상마다 한 번만 생깁니다(store).
+        recipe_paths = {
+            (idw, idp): [path for path, _, _ in files] + [path for path, _, _ in before.get((idw, None), [])]
+            for (idw, idp), files in before.items() if idp is not None
+        }
         store.finish_collection(
             db, job["id"], manifest=manifest, manifest_hash=manifest_hash(manifest),
             snapshot_dir=snap, pairs=job["pairs"], recipe_paths=recipe_paths,
@@ -279,6 +297,7 @@ def selection(body, app: Flask) -> dict:
         for idw, idp in recipes:
             layout.idp_path(class_name, idw, idp)
             layout.raw_dir(class_name, idw, idp)
+            layout.idw_path(class_name, idw)
     except ValueError as exc:
         raise _Bad("bad_path", str(exc)) from None
 
@@ -292,10 +311,17 @@ def selection(body, app: Flask) -> dict:
     if source in targets:
         raise _Bad("source_in_targets", f"원본 장비 {source} 는 대상이 될 수 없습니다.")
 
+    include_idw = body.get("include_idw", False)
+    if not isinstance(include_idw, bool):
+        raise _Bad("bad_request", "include_idw 는 true/false 여야 합니다.")
+
     cap = app.config["MAX_THREADS"]
     if len(targets) > cap:
         raise _Bad("too_many_targets", f"대상 {len(targets)}대가 스레드 상한 {cap}을 넘습니다.")
-    return {"source_eqp": source, "class_name": class_name, "recipes": recipes, "targets": targets, "tools": tools}
+    return {
+        "source_eqp": source, "class_name": class_name, "recipes": recipes, "targets": targets,
+        "include_idw": include_idw, "tools": tools,
+    }
 
 
 def _triples(value, what: str) -> list[tuple[str, str, str]]:
@@ -328,7 +354,7 @@ def _parse(body, app: Flask) -> dict:
     if used >= limit:
         raise _Bad("snapshot_full", f"스냅샷 총량 {used} B가 상한 {limit} B에 닿아 새 job 을 만들 수 없습니다.", 507)
     return {
-        "source_eqp": sel["source_eqp"], "class_name": sel["class_name"], "pairs": pairs,
+        "source_eqp": sel["source_eqp"], "class_name": sel["class_name"], "include_idw": sel["include_idw"], "pairs": pairs,
         "overwrites": overwrite, "create_class": create_class,
     }
 

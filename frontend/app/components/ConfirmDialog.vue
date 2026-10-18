@@ -1,12 +1,12 @@
 <script setup lang="ts">
 type Recipe = { idw: string, idp: string }
 type Pair = Recipe & { eqp: string }
-type Checked = { eqp: string, fab_name: string, class_missing: boolean, class_exists_other_fab: boolean, recipe_exists: Recipe[] }
+type Checked = { eqp: string, fab_name: string, class_missing: boolean, class_exists_other_fab: boolean, recipe_exists: Recipe[], idw_exists?: string[] }
 type Failed = { eqp: string, fab_name: string, error: { code: string, message: string } }
 export type Preflight = { source_fab: string, targets: (Checked | Failed)[] }
 export type Choice = { pairs: Pair[], overwrite: Pair[], create_class: string[] }
 
-const props = defineProps<{ eqp: string, cls: string, recipes: Recipe[], check: Preflight, sending: boolean }>()
+const props = defineProps<{ eqp: string, cls: string, recipes: Recipe[], includeIdw: boolean, check: Preflight, sending: boolean }>()
 const emit = defineEmits<{ confirm: [choice: Choice] }>()
 const open = defineModel<boolean>('open', { required: true })
 
@@ -14,7 +14,10 @@ const open = defineModel<boolean>('open', { required: true })
 const createClass = ref<string[]>([])
 const overwrite = ref<string[]>([])
 const key = (eqp: string, r: Recipe) => `${eqp}/${r.idw}/${r.idp}`
-const exists = (t: Checked, r: Recipe) => t.recipe_exists.some(e => e.idw === r.idw && e.idp === r.idp)
+const recipeExists = (t: Checked, r: Recipe) => t.recipe_exists.some(e => e.idw === r.idw && e.idp === r.idp)
+const idwExists = (t: Checked, r: Recipe) => (t.idw_exists ?? []).includes(r.idw)
+// 대상에 `.idw` 가 이미 있으면 그것을 쓰는 레시피도 덮어쓰기 허락이 필요합니다(스펙 "사전 점검과 확인").
+const exists = (t: Checked, r: Recipe) => recipeExists(t, r) || idwExists(t, r)
 
 const readable = computed(() => props.check.targets.filter((t): t is Checked => !('error' in t)))
 const unreadable = computed(() => props.check.targets.filter((t): t is Failed => 'error' in t))
@@ -52,8 +55,11 @@ const scale = computed(() => {
   return {
     tools: new Set(pairs.value.map(p => p.eqp)).size,
     recipes: needed.value.length,
-    // raw 폴더 파일 + .idp 1개
-    files: ready.value ? all.reduce((n, s) => n + s.file_count + 1, 0) : null,
+    // raw 폴더 파일 + .idp 1개, idw 포함이면 대상마다 idw 하나에 .idw 1개
+    files: ready.value
+      ? all.reduce((n, s) => n + s.file_count + 1, 0)
+        + (props.includeIdw ? new Set(pairs.value.map(p => `${p.eqp}/${p.idw}`)).size : 0)
+      : null,
     bytes: ready.value ? all.reduce((n, s) => n + s.total_bytes + s.idp_bytes!, 0) : null
   }
 })
@@ -126,7 +132,8 @@ function confirm() {
               type="checkbox"
               :value="key(t.eqp, r)"
             >
-            <span class="font-mono">{{ cls }}/{{ r.idw }}/{{ r.idp }}</span> 이(가) 이미 있습니다. 덮어쓰기
+            <span class="font-mono">{{ cls }}/{{ r.idw }}/{{ r.idp }}</span>
+            {{ recipeExists(t, r) ? '' : `가 쓰는 ${r.idw}.idw` }} 이(가) 이미 있습니다. 덮어쓰기
             (허락하지 않으면 이 레시피는 이 장비에서 빠집니다)
           </label>
         </div>
@@ -159,7 +166,7 @@ function confirm() {
       <div class="flex w-full flex-wrap items-center gap-3">
         <span class="sk-meta">
           장비 {{ scale.tools }}대 · 레시피 {{ scale.recipes }}개 ·
-          파일 {{ scale.files ?? '?' }}개 · 총 {{ scale.bytes === null ? '?' : size(scale.bytes) }}
+          파일 {{ scale.files ?? '?' }}개 · 총 {{ scale.bytes === null ? '?' : size(scale.bytes) }}{{ includeIdw ? ' + .idw' : '' }}
         </span>
         <UButton
           class="ml-auto"
