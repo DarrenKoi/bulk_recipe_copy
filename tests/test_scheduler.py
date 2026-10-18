@@ -195,6 +195,8 @@ def test_concurrent_collections_share_one_snapshot_cap(make, fleet):
             pass
 
     fleet["S1"].on_download = fleet["S2"].on_download = sync
+    # 전송이 실패해야 스냅샷이 남습니다(전부 verified 면 바로 지워짐).
+    fleet["T1"].reachable = fleet["T2"].reachable = False
     claimed = app.config["SCHEDULER"].admit()
     assert [j["id"] for j in claimed] == [first, second]
     runners = [threading.Thread(target=app.config["SCHEDULER"].run, args=(j,), kwargs={"parallel": False})

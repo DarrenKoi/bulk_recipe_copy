@@ -1,14 +1,22 @@
 <script setup lang="ts">
 import type { Choice, Preflight } from './ConfirmDialog.vue'
+import type { Retry } from './JobList.vue'
 
 type Tool = { eqp_id: string, fab_name: string, model: string }
 
-const props = defineProps<{ eqp: string, cls: string, picked: string[] }>()
-const emit = defineEmits<{ created: [id: number] }>()
+const props = defineProps<{ eqp: string, cls: string, picked: string[], retry?: Retry | null }>()
+const emit = defineEmits<{ 'created': [id: number], 'clear-retry': [] }>()
 
 const targets = ref<string[]>([])
 // 공유 파일을 모르고 덮지 않도록 기본은 끕니다.
 const includeIdw = ref(false)
+const only = computed(() => props.retry?.pairs.map(p => `${p.eqp}/${p.idw}/${p.idp}`))
+// 재시도를 고르면 그 job 에 남았던 대상과 `.idw` 포함 여부를 미리 고릅니다. 사용자는 빼거나 더할 수 있습니다.
+watch(() => props.retry, (r) => {
+  if (!r) return
+  targets.value = [...new Set(r.pairs.map(p => p.eqp))]
+  includeIdw.value = r.include_idw
+}, { immediate: true })
 const query = ref('')
 const sending = ref(false)
 const failure = ref<string | null>(null)
@@ -34,7 +42,7 @@ const reason = (e: any) => e?.data?.error?.message ?? e?.message
 
 // 점검 중이거나 팝업이 열린 동안 선택이 바뀌면 그 점검 결과는 버리고 다시 점검하게 합니다.
 // 문자열로 비교합니다. 부모가 같은 내용의 새 배열을 내려줘도 바뀐 것으로 보지 않게.
-watch(() => JSON.stringify([props.eqp, props.cls, props.picked, targets.value, includeIdw.value]), () => {
+watch(() => JSON.stringify([props.eqp, props.cls, props.picked, targets.value, includeIdw.value, props.retry?.job]), () => {
   if (!frozen.value || !(sending.value || confirming.value)) return
   frozen.value = null
   check.value = null
@@ -156,6 +164,20 @@ async function create(choice: Choice) {
       >같은 idw를 쓰는 다른 레시피도 영향받음</span>
     </label>
 
+    <p
+      v-if="retry"
+      class="sk-body flex flex-wrap items-center gap-2 text-(--sk-ink)"
+    >
+      job {{ retry.job }} 재시도: 미리 고른 대상에는 그 job에 남았던 레시피만 보냅니다.
+      <UButton
+        size="xs"
+        color="neutral"
+        variant="outline"
+        @click="emit('clear-retry')"
+      >
+        재시도 해제
+      </UButton>
+    </p>
     <div class="flex items-center gap-3">
       <UButton
         :disabled="!picked.length || !targets.length"
@@ -178,6 +200,7 @@ async function create(choice: Choice) {
       :recipes="frozen.recipes"
       :include-idw="frozen.include_idw"
       :check="check"
+      :only="only"
       :sending="sending"
       @confirm="create"
     />

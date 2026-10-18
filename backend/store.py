@@ -184,6 +184,21 @@ def finish_collection(db_path, job_id, *, manifest, manifest_hash, snapshot_dir,
         _move(conn, job_id, "collecting", "done", manifest_hash=manifest_hash, snapshot_dir=str(snapshot_dir))
 
 
+def request_cancel(db_path, job_id: int) -> None:
+    with connect(db_path) as conn:
+        conn.execute("UPDATE jobs SET cancel_requested = 1 WHERE id = ?", (job_id,))
+
+
+def cancel_requested(db_path, job_id: int) -> bool:
+    with connect(db_path) as conn:
+        return bool(conn.execute("SELECT cancel_requested FROM jobs WHERE id = ?", (job_id,)).fetchone()[0])
+
+
+def close_job(db_path, job_id: int) -> None:
+    with connect(db_path) as conn:
+        conn.execute("UPDATE jobs SET closed = 1 WHERE id = ?", (job_id,))
+
+
 def block_collection(db_path, job_id, frm: str, reason: str) -> None:
     with connect(db_path) as conn, _tx(conn):
         _move(conn, job_id, frm, "blocked", collection_reason=reason)
@@ -272,8 +287,9 @@ def _summary(conn, row) -> dict:
 
 
 def list_jobs(db_path) -> list[dict]:
+    """닫힌 job 은 목록에서 빠집니다. 상세 조회는 그대로 됩니다."""
     with connect(db_path) as conn:
-        return [_summary(conn, r) for r in conn.execute("SELECT * FROM jobs ORDER BY id DESC")]
+        return [_summary(conn, r) for r in conn.execute("SELECT * FROM jobs WHERE NOT closed ORDER BY id DESC")]
 
 
 def get_job(db_path, job_id: int) -> dict | None:

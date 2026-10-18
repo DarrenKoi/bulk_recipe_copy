@@ -2,6 +2,8 @@
 import type { Progress, TargetResult } from './JobResult.vue'
 
 type Counts = Record<'pending' | 'in_progress' | 'verified' | 'failed' | 'uncertain', number>
+type Pair = { eqp: string, idw: string, idp: string }
+export type Retry = { job: number, source_eqp: string, class_name: string, include_idw: boolean, pairs: Pair[] }
 type Job = {
   id: number
   executor: string
@@ -15,13 +17,19 @@ type Job = {
   file_counts: Counts
   queue_position?: number | null
   progress: Progress
+  include_idw: boolean
+  cancel_requested: boolean
+  closed: boolean
 }
 type Detail = Job & {
   targets: { eqp: string }[]
   recipes: { idw: string, idp: string }[]
+  pairs: Pair[]
   tree: TargetResult[]
 }
 
+const props = defineProps<{ user: string }>()
+const emit = defineEmits<{ retry: [retry: Retry] }>()
 const opened = defineModel<number | null>({ required: true })
 
 const COLLECTION = { waiting: '대기', collecting: '수집 중', done: '완료', blocked: '차단' } as const
@@ -50,6 +58,34 @@ onMounted(() => {
   }, POLL_MS)
 })
 onUnmounted(() => clearInterval(timer))
+
+// 재시도할 쌍: 수집이 막힌 job 은 남은 쌍 전부, 아니면 실패·불명확으로 끝난 장비에서 검증되지 않은 파일이 있는 레시피.
+// 취소로 남은 파일은 failed("취소")라 여기에 같이 실립니다.
+function retryPairs(d: Detail): Pair[] {
+  if (d.collection.state === 'blocked') return d.pairs
+  return d.tree
+    .filter(t => t.state === 'failed' || t.state === 'uncertain')
+    .flatMap(t => t.recipes
+      .filter(r => r.files.some(f => f.state !== 'verified'))
+      .map(r => ({ eqp: t.eqp, idw: r.idw, idp: r.idp })))
+}
+
+const acting = ref(false)
+const actionError = ref<string | null>(null)
+async function act(d: Detail, what: 'cancel' | 'close') {
+  acting.value = true
+  actionError.value = null
+  try {
+    await $fetch(`/api/jobs/${d.id}/${what}`, { method: 'POST' })
+    if (what === 'close') opened.value = null
+    else await refreshDetail()
+    await refreshList()
+  } catch (e: any) {
+    actionError.value = e?.data?.error?.message ?? e?.message
+  } finally {
+    acting.value = false
+  }
+}
 
 const collectionText = (j: Job) => j.queue_position
   ? `대기 ${j.queue_position}번째`
@@ -162,6 +198,40 @@ const collectionText = (j: Job) => j.queue_position
         <p class="sk-body text-(--sk-ink)">
           레시피: <span class="font-mono">{{ detail.recipes.map(r => `${r.idw}/${r.idp}`).join(', ') }}</span>
         </p>
+        <div class="flex flex-wrap items-center gap-2">
+          <UButton
+            v-if="detail.executor === props.user && !detail.progress.finished"
+            color="error"
+            variant="outline"
+            icon="i-lucide-square"
+            :disabled="detail.cancel_requested"
+            :loading="acting"
+            @click="act(detail, 'cancel')"
+          >
+            {{ detail.cancel_requested ? '취소 요청됨 · 지금 올리는 파일까지 끝냅니다' : '취소' }}
+          </UButton>
+          <UButton
+            v-if="detail.progress.finished && !detail.progress.success && retryPairs(detail).length"
+            icon="i-lucide-rotate-cw"
+            @click="emit('retry', { job: detail.id, source_eqp: detail.source_eqp, class_name: detail.class_name, include_idw: detail.include_idw, pairs: retryPairs(detail) })"
+          >
+            남은 장비 재시도
+          </UButton>
+          <UButton
+            v-if="detail.executor === props.user && detail.progress.finished && !detail.closed"
+            color="neutral"
+            variant="outline"
+            icon="i-lucide-archive"
+            :loading="acting"
+            @click="act(detail, 'close')"
+          >
+            닫기 (스냅샷 삭제)
+          </UButton>
+          <span
+            v-if="actionError"
+            class="sk-body text-(--sk-bad)"
+          >{{ actionError }}</span>
+        </div>
         <JobResult
           :tree="detail.tree"
           :progress="detail.progress"

@@ -107,11 +107,15 @@ class _Worker:
     def run(self) -> None:
         queue, i, failures = self.queue(), 0, 0
         while i < len(queue):
+            if self._cancelled_before(queue[i][2]):
+                return
             entered = False
             try:
                 with self.app.config["CONNECT"](self.tool) as ftp:
                     entered = True
                     while i < len(queue):
+                        if self._cancelled_before(queue[i][2]):
+                            return
                         self.send(ftp, *queue[i])
                         i, failures = i + 1, 0
             except _Discarded:
@@ -136,6 +140,13 @@ class _Worker:
                     self._end(self.claimed, "uncertain", reason)
                 store.fail_pending(self.db, self.job_id, reason, eqp=self.eqp)
                 return
+
+    def _cancelled_before(self, path: str) -> bool:
+        """파일 사이에서만 취소를 봅니다. 잡아 둔 파일(재연결해 이어 가는 중)은 put·검증까지 갑니다."""
+        if path == self.claimed or not store.cancel_requested(self.db, self.job_id):
+            return False
+        store.fail_pending(self.db, self.job_id, "취소", eqp=self.eqp)
+        return True
 
     def _give_up(self, reason: str) -> None:
         # 잡은 파일의 put 까지 끝났으면 대상에 무엇이 있는지 모릅니다. 근거 없이 실패로 두지 않습니다.

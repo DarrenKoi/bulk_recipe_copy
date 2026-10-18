@@ -35,6 +35,15 @@ class _Missing(_Blocked):
     """레시피의 `.idp` 나 요청한 `.idw` 가 원본에 없습니다."""
 
 
+def _stop_if_cancelled(db, job_id: int) -> None:
+    if store.cancel_requested(db, job_id):
+        raise _Blocked("취소")
+
+
+def snapshot_path(app: Flask, job_id: int) -> Path:
+    return app.config["SNAPSHOT_DIR"] / str(job_id)
+
+
 def _recipe_files(ftp, class_name: str, idw: str, idp: str):
     """레시피의 파일 목록(경로·크기·mtime). 받을 파일 목록이자 변경 탐지의 비교 대상입니다."""
     idp_file = layout.idp_path(class_name, idw, idp)
@@ -102,11 +111,12 @@ def collect(app: Flask, job: dict) -> None:
 
 def _collect(app: Flask, job: dict) -> None:
     db, root = app.config["DB_PATH"], app.config["SNAPSHOT_DIR"]
-    snap = root / str(job["id"])
+    snap = snapshot_path(app, job["id"])
     shutil.rmtree(snap, ignore_errors=True)
     recipes = sorted({(idw, idp) for _, idw, idp in job["pairs"]})
     include_idw = bool(job["include_idw"])
     try:
+        _stop_if_cancelled(db, job["id"])
         cap = app.config["SNAPSHOT_CAP_BYTES"]
         try:
             left = cap - (snapshot_bytes(root) if root.exists() else 0)
@@ -125,6 +135,7 @@ def _collect(app: Flask, job: dict) -> None:
                 budget, manifest = left, []
                 for files in before.values():
                     for path, _, _ in files:
+                        _stop_if_cancelled(db, job["id"])
                         try:
                             data = ftp.download(path, max_bytes=max(budget, 0))
                         except TransferTooLarge:
@@ -140,6 +151,7 @@ def _collect(app: Flask, job: dict) -> None:
                     break
             else:
                 raise _Blocked("원본이 바뀌는 중")
+        _stop_if_cancelled(db, job["id"])
         # `.idw` 도 그것을 쓰는 레시피의 경로로 넣습니다. file 행은 대상마다 한 번만 생깁니다(store).
         recipe_paths = {
             (idw, idp): [path for path, _, _ in files] + [path for path, _, _ in before.get((idw, None), [])]
@@ -219,6 +231,9 @@ class Scheduler:
         try:
             collect(self.app, job)
             transfer_job(self.app, job["id"], parallel=parallel)
+            # 전부 verified 면 스냅샷을 바로 지웁니다. 아니면 실행자가 닫을 때(스펙 "스냅샷 수집").
+            if (done := store.get_job(self.app.config["DB_PATH"], job["id"])) and done["progress"]["success"]:
+                shutil.rmtree(snapshot_path(self.app, job["id"]), ignore_errors=True)
         finally:
             with self.lock:
                 del self.running[job["id"]]
@@ -377,6 +392,42 @@ def register_jobs(app: Flask) -> None:
         for j in jobs:
             j["queue_position"] = waiting.index(j["id"]) + 1 if j["id"] in waiting else None
         return {"jobs": jobs}
+
+    def own_job(job_id):
+        """(job, None) 또는 (None, 오류 응답). 취소·닫기는 실행자 본인만(스펙 "권한")."""
+        job = store.get_job(app.config["DB_PATH"], job_id)
+        if job is None:
+            return None, error_json("not_found", f"job {job_id} 이 없습니다.", 404)
+        if job["executor"] != g.user:
+            return None, error_json("not_executor", "실행자만 취소·닫기를 할 수 있습니다.", 403)
+        return job, None
+
+    @app.post("/api/jobs/<int:job_id>/cancel")
+    def cancel_job(job_id):
+        job, err = own_job(job_id)
+        if err:
+            return err
+        if job["progress"]["finished"]:
+            return error_json("finished", f"job {job_id} 은 이미 끝났습니다.", 409)
+        db = app.config["DB_PATH"]
+        store.request_cancel(db, job_id)
+        if job["collection"]["state"] == "waiting":
+            try:
+                store.block_collection(db, job_id, "waiting", "취소")
+            except RuntimeError:
+                pass  # 그 사이 시작됐습니다. 수집이 플래그를 보고 멈춥니다.
+        return store.get_job(db, job_id)
+
+    @app.post("/api/jobs/<int:job_id>/close")
+    def close_job(job_id):
+        job, err = own_job(job_id)
+        if err:
+            return err
+        if not job["progress"]["finished"]:
+            return error_json("not_finished", f"job {job_id} 은 아직 끝나지 않았습니다.", 409)
+        store.close_job(app.config["DB_PATH"], job_id)
+        shutil.rmtree(snapshot_path(app, job_id), ignore_errors=True)
+        return store.get_job(app.config["DB_PATH"], job_id)
 
     @app.get("/api/jobs/<int:job_id>")
     def get_job(job_id):

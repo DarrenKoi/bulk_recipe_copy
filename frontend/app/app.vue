@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { Retry } from '~/components/JobList.vue'
+
 type Me = { user: string, allowed: boolean }
 
 const { data: me, error } = await useFetch<Me>('/api/me')
@@ -6,11 +8,27 @@ const source = ref<string | null>(null)
 const cls = ref<string | undefined>()
 const picked = ref<string[]>([])
 const openedJob = ref<number | null>(null)
+const retry = ref<Retry | null>(null)
 
 watch(source, () => {
   cls.value = undefined
   picked.value = []
 })
+watch([source, cls], () => {
+  if (retry.value && (source.value !== retry.value.source_eqp || cls.value !== retry.value.class_name)) retry.value = null
+})
+
+// 재시도: 원본·class·레시피를 복원합니다. 위 watch 와 RecipeBrowser 의 watch 가 하위 선택을
+// 비우므로 한 단계씩 tick 을 넘기며 채웁니다.
+async function startRetry(r: Retry) {
+  retry.value = null
+  source.value = r.source_eqp
+  await nextTick()
+  cls.value = r.class_name
+  await nextTick()
+  picked.value = [...new Set(r.pairs.map(p => `${p.idw}/${p.idp}`))]
+  retry.value = r
+}
 
 // 401: LASTUSER 쿠키 없음, 그 외 오류: 서버에 닿지 않음, allowed=false: 허용 목록 밖.
 const blocked = computed(() => {
@@ -73,9 +91,15 @@ const blocked = computed(() => {
           :eqp="source"
           :cls="cls"
           :picked="picked"
-          @created="openedJob = $event"
+          :retry="retry"
+          @created="openedJob = $event; retry = null"
+          @clear-retry="retry = null"
         />
-        <JobList v-model="openedJob" />
+        <JobList
+          v-model="openedJob"
+          :user="me.user"
+          @retry="startRetry"
+        />
       </template>
     </main>
   </UApp>

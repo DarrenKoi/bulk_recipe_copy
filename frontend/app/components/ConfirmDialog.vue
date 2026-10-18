@@ -6,7 +6,7 @@ type Failed = { eqp: string, fab_name: string, error: { code: string, message: s
 export type Preflight = { source_fab: string, targets: (Checked | Failed)[] }
 export type Choice = { pairs: Pair[], overwrite: Pair[], create_class: string[] }
 
-const props = defineProps<{ eqp: string, cls: string, recipes: Recipe[], includeIdw: boolean, check: Preflight, sending: boolean }>()
+const props = defineProps<{ eqp: string, cls: string, recipes: Recipe[], includeIdw: boolean, check: Preflight, sending: boolean, only?: string[] }>()
 const emit = defineEmits<{ confirm: [choice: Choice] }>()
 const open = defineModel<boolean>('open', { required: true })
 
@@ -20,6 +20,11 @@ const idwExists = (t: Checked, r: Recipe) => (t.idw_exists ?? []).includes(r.idw
 const exists = (t: Checked, r: Recipe) => recipeExists(t, r) || idwExists(t, r)
 // 허락 하나가 그 쌍의 `.idp`·raw 와 공유 `.idw` 를 함께 덮으므로, `.idw` 가 있으면 늘 이름을 밝힙니다.
 const idwNote = (t: Checked, r: Recipe) => !idwExists(t, r) ? '' : `${recipeExists(t, r) ? '와 그것이' : '가'} 쓰는 ${r.idw}.idw`
+// 재시도(`only`, 키 eqp/idw/idp): 그 job 에 남았던 쌍만 보냅니다. `only` 에 없는 장비는 평소처럼 모든 레시피.
+const wanted = (eqp: string, r: Recipe) => {
+  const mine = props.only?.filter(k => k.startsWith(`${eqp}/`))
+  return !mine?.length || mine.includes(key(eqp, r))
+}
 
 const readable = computed(() => props.check.targets.filter((t): t is Checked => !('error' in t)))
 const unreadable = computed(() => props.check.targets.filter((t): t is Failed => 'error' in t))
@@ -28,7 +33,7 @@ const unreadable = computed(() => props.check.targets.filter((t): t is Failed =>
 const pairs = computed<Pair[]>(() => readable.value
   .filter(t => !t.class_missing || createClass.value.includes(t.eqp))
   .flatMap(t => props.recipes
-    .filter(r => !exists(t, r) || overwrite.value.includes(key(t.eqp, r)))
+    .filter(r => wanted(t.eqp, r) && (!exists(t, r) || overwrite.value.includes(key(t.eqp, r))))
     .map(r => ({ eqp: t.eqp, ...r }))))
 
 // 파일 수·크기는 수집 전이라 서버가 모릅니다. 고른 레시피마다 원본의 요약 API(raw 폴더 + .idp 크기)로 셉니다.
@@ -103,7 +108,7 @@ function confirm() {
             <span class="font-mono text-(--sk-ink)">{{ t.eqp }}</span>
             <span class="sk-meta">{{ t.fab_name }}</span>
             <span
-              v-if="!t.class_missing && !t.recipe_exists.length"
+              v-if="!t.class_missing && !recipes.some(r => wanted(t.eqp, r) && exists(t, r))"
               class="sk-meta ml-auto"
             >그대로 진행</span>
           </div>
@@ -125,7 +130,7 @@ function confirm() {
             다른 fab({{ t.fab_name }})에 같은 class {{ cls }} 가 있습니다. 이름만 같은 다른 공정이 아닌지 주의하세요.
           </p>
           <label
-            v-for="r in recipes.filter(r => exists(t, r))"
+            v-for="r in recipes.filter(r => wanted(t.eqp, r) && exists(t, r))"
             :key="key(t.eqp, r)"
             class="sk-body flex items-center gap-2 text-(--sk-ink)"
           >
