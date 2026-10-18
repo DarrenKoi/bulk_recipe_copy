@@ -205,26 +205,6 @@ def test_unknown_job_is_404(app_client):
     assert c.get("/api/jobs/999").status_code == 404
 
 
-def test_a_job_left_collecting_by_a_restart_is_not_collected_again(make, fleet):
-    # 티켓 12 전까지는 재기동이 미완료 job 을 다시 돌리지 않습니다.
-    app, c = make()
-    job_id = c.post("/api/jobs", json=body()).json["id"]
-
-    def die(*_, **__):
-        raise SystemExit("process killed mid-collection")
-
-    fleet["6MCDE301"].download = die
-    with pytest.raises(SystemExit):
-        run_until_idle(app)
-    del fleet["6MCDE301"].download
-
-    app2, c2 = make()
-    run_until_idle(app2)
-    job = c2.get(f"/api/jobs/{job_id}").json
-    assert job["collection"] == {"state": "collecting", "reason": None}
-    assert job["manifest"]["file_count"] == 0
-
-
 def test_manifest_hash_ignores_order_and_changes_with_content():
     from backend.jobs import manifest_hash
 

@@ -266,8 +266,8 @@ def cancel_after_reading(monkeypatch, c, job_id):
     """대기 job 을 읽은 직후 그 job 이 취소되는 경쟁."""
     waiting_jobs = store.waiting_jobs
 
-    def racing(db):
-        jobs = waiting_jobs(db)
+    def racing(db, *resumed):
+        jobs = waiting_jobs(db, *resumed)
         assert c.post(f"/api/jobs/{job_id}/cancel").status_code == 200
         return jobs
 

@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   manifest_hash TEXT,
   snapshot_dir TEXT,
   cancel_requested INTEGER NOT NULL DEFAULT 0,
-  closed INTEGER NOT NULL DEFAULT 0
+  closed INTEGER NOT NULL DEFAULT 0,
+  untransferable TEXT  -- "전송 불가" 사유. NULL 이면 보낼 수 있습니다(스펙 "재수집 규칙")
 );
 CREATE TABLE IF NOT EXISTS job_targets (
   job_id INTEGER NOT NULL REFERENCES jobs(id),
@@ -78,8 +79,14 @@ CREATE TABLE IF NOT EXISTS target_only (
 
 # 수집 결과의 전이는 이 표 하나로만 일어납니다. done·blocked 는 종료입니다.
 _COLLECTION_NEXT = {"waiting": {"collecting", "blocked"}, "collecting": {"done", "blocked"}}
-# file 상태 전이도 표 하나로만. verified·failed·uncertain 은 종료입니다.
-_FILE_NEXT = {"pending": {"in_progress", "failed"}, "in_progress": {"verified", "failed", "uncertain"}}
+# file 상태 전이도 표 하나로만. verified·failed 는 종료이고, uncertain 은 재기동 대조에서만 다시 움직입니다.
+_FILE_NEXT = {
+    "pending": {"in_progress", "failed"},
+    "in_progress": {"verified", "failed", "uncertain"},
+    "uncertain": {"verified", "pending"},
+}
+# "전송 불가" job 의 남은 file 사유.
+UNTRANSFERABLE = "job 확인 뒤 원본이 바뀜"
 
 
 @contextmanager
@@ -107,6 +114,9 @@ def init(db_path: Path) -> None:
     with connect(db_path) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)
+        # 티켓 12 전에 만든 DB 에는 이 열이 없습니다.
+        if "untransferable" not in {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}:
+            conn.execute("ALTER TABLE jobs ADD COLUMN untransferable TEXT")
 
 
 def create_job(db_path, *, executor, source_eqp, class_name, pairs, overwrites=(), create_class=(), include_idw=False) -> int:
@@ -142,22 +152,36 @@ def _move(conn, job_id: int, frm: str, to: str, **fields) -> None:
         raise RuntimeError(f"job {job_id} 은(는) 이미 {frm} 이 아닙니다")
 
 
-def waiting_jobs(db_path) -> list[dict]:
-    """아직 시작하지 않은 job 을 id 순으로: id, 원본, 대상 목록."""
+def waiting_jobs(db_path, resumed=()) -> list[dict]:
+    """아직 시작하지 않은 job 과 `resumed`(재기동 전에 시작한 job) 를 id 순으로: id, 수집 결과, 원본, 대상 목록."""
+    ids = list(resumed)
     with connect(db_path) as conn:
-        rows = conn.execute("SELECT id, source_eqp FROM jobs WHERE collection = 'waiting' ORDER BY id").fetchall()
-        return [{"id": r["id"], "source_eqp": r["source_eqp"], "targets": [t[0] for t in conn.execute(
-            "SELECT eqp FROM job_targets WHERE job_id = ? ORDER BY eqp", (r["id"],))]} for r in rows]
+        rows = conn.execute(
+            f"SELECT id, collection, source_eqp FROM jobs WHERE collection = 'waiting' "
+            f"OR id IN ({', '.join('?' * len(ids))}) ORDER BY id", ids).fetchall()
+        return [{"id": r["id"], "collection": r["collection"], "source_eqp": r["source_eqp"], "targets": [
+            t[0] for t in conn.execute("SELECT eqp FROM job_targets WHERE job_id = ? ORDER BY eqp", (r["id"],))]}
+            for r in rows]
+
+
+def _load(conn, job_id: int) -> dict:
+    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    pairs = [tuple(r) for r in conn.execute(
+        "SELECT eqp, idw, idp FROM job_pairs WHERE job_id = ? ORDER BY eqp, idw, idp", (job_id,))]
+    return dict(row) | {"pairs": pairs}
 
 
 def claim_job(db_path, job_id: int) -> dict:
     """대기 job 을 수집 중으로 바꾸고 수집 재료를 돌려줍니다. 시작 판정은 스케줄러가 합니다."""
     with connect(db_path) as conn, _tx(conn):
         _move(conn, job_id, "waiting", "collecting")
-        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-        pairs = [tuple(r) for r in conn.execute(
-            "SELECT eqp, idw, idp FROM job_pairs WHERE job_id = ? ORDER BY eqp, idw, idp", (job_id,))]
-    return dict(row) | {"pairs": pairs}
+        return _load(conn, job_id)
+
+
+def load_job(db_path, job_id: int) -> dict:
+    """재기동 전에 시작한 job 을 상태를 바꾸지 않고 다시 잡습니다(`collection` 이 수집 중이면 재수집, 완료면 전송)."""
+    with connect(db_path) as conn:
+        return _load(conn, job_id)
 
 
 def claim_next_waiting(db_path):
@@ -229,7 +253,11 @@ def transfer_plan(db_path, job_id: int) -> dict | None:
             pending.setdefault(r["target_eqp"], []).append(r["path"])
         return {
             "id": job_id,
+            "source_eqp": row["source_eqp"],
             "class_name": row["class_name"],
+            "include_idw": row["include_idw"],
+            "manifest_hash": row["manifest_hash"],
+            "untransferable": row["untransferable"],
             "snapshot_dir": row["snapshot_dir"],
             "manifest": {r["path"]: r["sha256"] for r in conn.execute(
                 "SELECT path, sha256 FROM manifest WHERE job_id = ?", (job_id,))},
@@ -242,6 +270,10 @@ def transfer_plan(db_path, job_id: int) -> dict | None:
             "create_class": {r["eqp"] for r in conn.execute(
                 "SELECT eqp FROM job_targets WHERE job_id = ? AND may_create_class", (job_id,))},
             "pending": pending,
+            # 재기동 전에 put 이 대상에 닿은 file. 그 레시피는 첫 쓰기 전 재확인을 이미 지났습니다.
+            "written": {(r["target_eqp"], r["path"]) for r in conn.execute(
+                "SELECT target_eqp, path FROM files WHERE job_id = ? "
+                "AND (state IN ('verified', 'uncertain') OR reason = '해시 불일치')", (job_id,))},
         }
 
 
@@ -282,6 +314,44 @@ def fail_pending(db_path, job_id, reason: str, *, eqp=None, paths=None) -> None:
             conn.executemany(sql + " AND path = ?", [(*args, p) for p in paths])
 
 
+def mark_untransferable(db_path, job_id: int, reason: str) -> None:
+    """job 을 "전송 불가"로 두고 남은 `pending` 을 끝냅니다. 처음 사유만 남깁니다."""
+    with connect(db_path) as conn, _tx(conn):
+        conn.execute("UPDATE jobs SET untransferable = ? WHERE id = ? AND untransferable IS NULL", (reason, job_id))
+        conn.execute("UPDATE files SET state = 'failed', reason = ? WHERE job_id = ? AND state = 'pending'",
+                     (UNTRANSFERABLE, job_id))
+
+
+def files_to_reconcile(db_path) -> list[dict]:
+    """재기동 대조 대상. `in_progress` 를 `uncertain` 으로 바꾼 뒤, 닫히지 않은 job 의 `uncertain` 전부와 기대 SHA-256.
+
+    닫힌 job 은 실행자가 결과를 확인하고 스냅샷을 지운 것이라 다시 열지 않습니다.
+    """
+    with connect(db_path) as conn, _tx(conn):
+        conn.execute("UPDATE files SET state = 'uncertain', reason = '재기동 때 전송 중' WHERE state = 'in_progress'")
+        return [dict(r) for r in conn.execute(
+            "SELECT f.job_id, f.target_eqp AS eqp, f.path, m.sha256 FROM files f "
+            "JOIN jobs j ON j.id = f.job_id JOIN manifest m ON m.job_id = f.job_id AND m.path = f.path "
+            "WHERE f.state = 'uncertain' AND NOT j.closed ORDER BY f.target_eqp, f.job_id, f.path")]
+
+
+def settle_after_reconcile(db_path) -> list[int]:
+    """대조 뒤 "전송 불가"·취소를 다시 적용하고, 이어 돌릴 job(수집 중, 또는 `pending` 이 남은 완료) id 를 돌려줍니다."""
+    with connect(db_path) as conn, _tx(conn):
+        conn.execute(
+            "UPDATE files SET state = 'failed', reason = ? WHERE state = 'pending' "
+            "AND job_id IN (SELECT id FROM jobs WHERE untransferable IS NOT NULL)", (UNTRANSFERABLE,))
+        conn.execute(
+            "UPDATE files SET state = 'failed', reason = '취소' WHERE state = 'pending' "
+            "AND job_id IN (SELECT id FROM jobs WHERE cancel_requested)")
+        conn.execute(
+            "UPDATE jobs SET collection = 'blocked', collection_reason = '취소' "
+            "WHERE collection = 'collecting' AND cancel_requested")
+        return [r[0] for r in conn.execute(
+            "SELECT id FROM jobs WHERE NOT closed AND (collection = 'collecting' OR (collection = 'done' AND EXISTS "
+            "(SELECT 1 FROM files WHERE files.job_id = jobs.id AND state = 'pending'))) ORDER BY id")]
+
+
 def _summary(conn, row) -> dict:
     job_id = row["id"]
     counts = results.counts({r["state"]: r["n"] for r in conn.execute(
@@ -305,6 +375,7 @@ def _summary(conn, row) -> dict:
         "progress": results.job_progress(row["collection"], counts),
         "cancel_requested": bool(row["cancel_requested"]),
         "closed": bool(row["closed"]),
+        "untransferable": row["untransferable"],
     }
 
 

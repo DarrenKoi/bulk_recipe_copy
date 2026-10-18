@@ -3,6 +3,7 @@
 import hashlib
 import posixpath
 import threading
+from itertools import groupby
 from ftplib import Error as FtpError
 from ftplib import error_perm
 from pathlib import Path
@@ -35,6 +36,10 @@ class _Discarded(Exception):
 
 class _SnapshotDamaged(Exception):
     pass
+
+
+def _in_recipe(cls: str, idw: str, idp: str, path: str) -> bool:
+    return path == layout.idp_path(cls, idw, idp) or path.startswith(layout.raw_dir(cls, idw, idp) + "/")
 
 
 def _names(ftp, remote_dir: str, deadline: float) -> set[str] | None:
@@ -72,8 +77,16 @@ class _Worker:
         self.app, self.plan, self.eqp, self.tool = app, plan, eqp, tool
         self.db, self.job_id = app.config["DB_PATH"], plan["id"]
         self.seconds, self.max_bytes = app.config["TRANSFER_SECONDS"], app.config["TRANSFER_MAX_BYTES"]
-        self.checked: set[tuple[str, str]] = set()  # 첫 쓰기 전 재확인을 마친 (idw, idp)
-        self.rejected: set[tuple[str, str]] = set()  # 첫 쓰기 전 재확인에서 빠진 (idw, idp)
+        # 첫 쓰기 전 재확인을 마친 (idw, idp). 재기동 전에 이미 써 넣은 레시피는 다시 보면 제 파일에 걸립니다.
+        written = {p for e, p in plan["written"] if e == eqp}
+        self.checked: set[tuple[str, str]] = {
+            (idw, idp) for e, idw, idp in plan["pairs"]
+            if e == eqp and any(_in_recipe(plan["class_name"], idw, idp, p) for p in written)
+        }
+        # 첫 쓰기 전 재확인에서 빠진 (idw, idp).
+        # ponytail: 재기동 전에 빠진 쌍은 기억하지 않아, 그 쌍만 쓰던 `.idw` 가 재기동 뒤 대상에 없으면 올라갑니다.
+        # 문제가 되면 재확인 탈락을 file 사유와 구분해 SQLite 에 남깁니다.
+        self.rejected: set[tuple[str, str]] = set()
         self.made: set[str] = set()  # 이미 mkdir 한 폴더
         # class 폴더(`{class}/`, `{class}/data/`)는 허락받은 대상만 만듭니다. 허락이 없으면 레시피마다
         # 첫 쓰기 전에 `{class}/data/` 가 있는지 보고, mkdir 도 그 아래만 만듭니다. 한 번 있었다는
@@ -95,8 +108,7 @@ class _Worker:
         out = []
         for eqp, idw, idp in self.plan["pairs"]:
             if eqp == self.eqp:
-                idp_path, raw = layout.idp_path(cls, idw, idp), layout.raw_dir(cls, idw, idp) + "/"
-                paths = [p for p in pending if p == idp_path or p.startswith(raw)]
+                paths = [p for p in pending if _in_recipe(cls, idw, idp, p)]
                 if paths:
                     out += [((idw, idp), paths, p) for p in paths]
         for idw in dict.fromkeys(idw for eqp, idw, _ in self.plan["pairs"] if eqp == self.eqp):
@@ -169,7 +181,7 @@ class _Worker:
     def send(self, ftp, recipe: tuple[str, str | None], recipe_paths: list[str], path: str) -> None:
         if path != self.claimed:
             if not store.claim_file(self.db, self.job_id, self.eqp, path):
-                # 이미 실패 처리됐거나(재확인, 스냅샷 손상) 취소가 수락됐습니다. 취소면 남은 pending 을 끝냅니다.
+                # 이미 실패 처리됐거나(재확인, 전송 불가) 취소가 수락됐습니다. 취소면 남은 pending 을 끝냅니다.
                 self._cancelled_before(path)
                 return
             self.claimed, self.put_done = path, False
@@ -177,10 +189,12 @@ class _Worker:
             try:
                 data = self._snapshot(path)
             except _SnapshotDamaged:
-                self._end(path, "failed", "스냅샷 손상")
-                # 같은 스냅샷을 쓰는 job 전체를 멈춥니다. 재수집은 티켓 12.
-                store.fail_pending(self.db, self.job_id, "스냅샷 손상")
-                return
+                from .jobs import recollect  # jobs 가 이 모듈을 import 합니다.
+
+                # 원격 쓰기 전입니다. 재수집 규칙: 원본을 다시 받아 manifest 가 같을 때만 이어 갑니다.
+                if (reason := recollect(self.app, self.job_id, path)) is not None:
+                    return self._end(path, "failed", reason)
+                data = self._snapshot(path)
             if data is None:
                 return self._end(path, "failed", "전송 크기 상한 초과")
             if recipe[1] is None:
@@ -310,5 +324,52 @@ def _logged(app: Flask, worker: _Worker) -> None:
     try:
         worker.run()
     except Exception:
-        # run() 의 정리 자체가 실패한 경우뿐입니다. 남은 in_progress 는 재기동 대조(티켓 12).
+        # run() 의 정리 자체가 실패한 경우뿐입니다. 남은 in_progress 는 다음 기동의 재기동 대조가 거둡니다.
         app.logger.exception("job %s %s: worker crashed", worker.job_id, worker.eqp)
+
+
+def _compare(ftp, path: str, sha256: str, seconds: float, max_bytes: int) -> str | None:
+    """대상 file 을 받아 manifest 와 같으면 verified, 다르거나 없으면 pending, 알 수 없으면 None."""
+    try:
+        data = ftp.download(path, max_bytes=max_bytes, deadline=seconds)
+    except TransferTooLarge:
+        return "pending"
+    except error_perm as exc:
+        if not str(exc).startswith("550"):
+            return None
+        # 550 만으로는 없다고 보지 않습니다(`_names`). 상위 목록에 이름이 없어야 없음입니다.
+        names = _names(ftp, posixpath.dirname(path), seconds)
+        return "pending" if names is None or posixpath.basename(path) not in names else None
+    return "verified" if hashlib.sha256(data).hexdigest() == sha256 else "pending"
+
+
+def reconcile(app: Flask, files: list[dict]) -> None:
+    """재기동 대조(스펙 "재기동 대조 복구"). `files` 는 `store.files_to_reconcile` 의 `uncertain` file.
+
+    대상마다 연결 하나로 차례로 받아 봅니다. 읽지 못한 file 은 `uncertain` 그대로이고, 대상의 임시 파일은
+    출처를 모르므로 지우지 않습니다.
+    ponytail: 대상을 하나씩 돕니다. 기동이 너무 느려지면 대상마다 스레드로.
+    """
+    if not files:
+        return
+    db, seconds, max_bytes = app.config["DB_PATH"], app.config["TRANSFER_SECONDS"], app.config["TRANSFER_MAX_BYTES"]
+    try:
+        tools = {t.eqp_id: t for t in hitachi_tools(app.config["ROSTER"]())}
+    except (LookupError, RuntimeError):
+        app.logger.exception("reconcile: roster unavailable")
+        return
+    for eqp, group in groupby(files, key=lambda f: f["eqp"]):
+        if eqp not in tools:
+            continue
+        try:
+            with app.config["CONNECT"](tools[eqp]) as ftp:
+                for f in group:
+                    try:
+                        to = _compare(ftp, f["path"], f["sha256"], seconds, max_bytes)
+                    except Exception:
+                        app.logger.warning("reconcile %s %s failed", eqp, f["path"], exc_info=True)
+                        continue
+                    if to is not None:
+                        store.move_file(db, f["job_id"], eqp, f["path"], "uncertain", to)
+        except Exception:
+            app.logger.warning("reconcile: %s unreachable", eqp, exc_info=True)

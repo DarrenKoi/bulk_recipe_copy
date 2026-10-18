@@ -20,6 +20,7 @@ type Job = {
   include_idw: boolean
   cancel_requested: boolean
   closed: boolean
+  untransferable: string | null
 }
 type Detail = Job & {
   targets: { eqp: string }[]
@@ -191,6 +192,12 @@ const collectionText = (j: Job) => j.queue_position
           <template v-if="detail.collection.state === 'done'">
             · 파일 {{ detail.manifest.file_count }}개, {{ detail.manifest.total_bytes }} B
           </template>
+        </p>
+        <p
+          v-if="detail.untransferable"
+          class="sk-body text-(--sk-bad)"
+        >
+          전송 불가: {{ detail.untransferable }} · 남은 파일은 보내지 않습니다. 다른 버전을 보내려면 새 job을 만드세요.
         </p>
         <p class="sk-body text-(--sk-ink)">
           대상: <span class="font-mono">{{ detail.targets.map(t => t.eqp).join(', ') }}</span>

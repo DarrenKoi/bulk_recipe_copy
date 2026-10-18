@@ -15,7 +15,7 @@ from ftp_handler.core.client import TransferTooLarge
 from . import layout, scheduler, store
 from .browse import walk_files
 from .roster import hitachi_tools
-from .transfer import transfer_job
+from .transfer import reconcile, transfer_job
 
 
 def manifest_hash(manifest: list[tuple[str, int, str]]) -> str:
@@ -49,9 +49,13 @@ class _Missing(_Blocked):
     """레시피의 `.idp` 나 요청한 `.idw` 가 원본에 없습니다."""
 
 
+class _Cancelled(_Blocked):
+    pass
+
+
 def _stop_if_cancelled(db, job_id: int) -> None:
     if store.cancel_requested(db, job_id):
-        raise _Blocked("취소")
+        raise _Cancelled("취소")
 
 
 def snapshot_path(app: Flask, job_id: int) -> Path:
@@ -123,48 +127,53 @@ def collect(app: Flask, job: dict) -> None:
         _collect(app, job)
 
 
-def _collect(app: Flask, job: dict) -> None:
+def _snapshot_source(app: Flask, job: dict, snap: Path) -> tuple[list[tuple[str, int, str]], dict]:
+    """원본을 연결 하나로 `snap` 에 받아 (manifest, 수집 목록)을 돌려줍니다. 수집 오류는 예외입니다."""
     db, root = app.config["DB_PATH"], app.config["SNAPSHOT_DIR"]
-    snap = snapshot_path(app, job["id"])
     shutil.rmtree(snap, ignore_errors=True)
     recipes = sorted({(idw, idp) for _, idw, idp in job["pairs"]})
     include_idw = bool(job["include_idw"])
+    _stop_if_cancelled(db, job["id"])
+    cap = app.config["SNAPSHOT_CAP_BYTES"]
     try:
-        _stop_if_cancelled(db, job["id"])
-        cap = app.config["SNAPSHOT_CAP_BYTES"]
-        try:
-            left = cap - snapshot_bytes(root)
-        except OSError as exc:
-            app.logger.exception("snapshot size check failed")
-            raise _Blocked(f"수집 오류: 로컬 저장 실패({type(exc).__name__})") from exc
-        tools = {t.eqp_id: t for t in hitachi_tools(app.config["ROSTER"]())}
-        if job["source_eqp"] not in tools:
-            raise LookupError(f"명부에 없는 Hitachi 장비입니다: {job['source_eqp']}")
-        with app.config["CONNECT"](tools[job["source_eqp"]]) as ftp:
-            # 수집 전후 목록이 같아야 스냅샷을 씁니다. 탐지이지 증명이 아닙니다(스펙 "스냅샷 수집"):
-            # 두 목록 사이에 크기·mtime이 같게 바뀐 파일(LIST mtime은 분 단위일 수 있음)은 못 잡습니다.
-            for _ in range(2):
-                shutil.rmtree(snap, ignore_errors=True)
-                before = _listing(ftp, job["class_name"], recipes, include_idw)
-                budget, manifest = left, []
-                for files in before.values():
-                    for path, _, _ in files:
-                        _stop_if_cancelled(db, job["id"])
-                        try:
-                            data = ftp.download(path, max_bytes=max(budget, 0))
-                        except TransferTooLarge:
-                            raise _Blocked(f"수집 오류: 스냅샷 총량 상한 {cap} B를 넘습니다.") from None
-                        budget -= len(data)
-                        _save(app, snap, path, data)
-                        manifest.append((path, len(data), hashlib.sha256(data).hexdigest()))
-                try:
-                    after = _listing(ftp, job["class_name"], recipes, include_idw)
-                except _Missing:  # 편집기가 .idp를 교체하는 중이면 한 번 더 수집합니다.
-                    after = None
-                if after == before:
-                    break
-            else:
-                raise _Blocked("원본이 바뀌는 중")
+        left = cap - snapshot_bytes(root)
+    except OSError as exc:
+        app.logger.exception("snapshot size check failed")
+        raise _Blocked(f"수집 오류: 로컬 저장 실패({type(exc).__name__})") from exc
+    tools = {t.eqp_id: t for t in hitachi_tools(app.config["ROSTER"]())}
+    if job["source_eqp"] not in tools:
+        raise LookupError(f"명부에 없는 Hitachi 장비입니다: {job['source_eqp']}")
+    with app.config["CONNECT"](tools[job["source_eqp"]]) as ftp:
+        # 수집 전후 목록이 같아야 스냅샷을 씁니다. 탐지이지 증명이 아닙니다(스펙 "스냅샷 수집"):
+        # 두 목록 사이에 크기·mtime이 같게 바뀐 파일(LIST mtime은 분 단위일 수 있음)은 못 잡습니다.
+        for _ in range(2):
+            shutil.rmtree(snap, ignore_errors=True)
+            before = _listing(ftp, job["class_name"], recipes, include_idw)
+            budget, manifest = left, []
+            for files in before.values():
+                for path, _, _ in files:
+                    _stop_if_cancelled(db, job["id"])
+                    try:
+                        data = ftp.download(path, max_bytes=max(budget, 0))
+                    except TransferTooLarge:
+                        raise _Blocked(f"수집 오류: 스냅샷 총량 상한 {cap} B를 넘습니다.") from None
+                    budget -= len(data)
+                    _save(app, snap, path, data)
+                    manifest.append((path, len(data), hashlib.sha256(data).hexdigest()))
+            try:
+                after = _listing(ftp, job["class_name"], recipes, include_idw)
+            except _Missing:  # 편집기가 .idp를 교체하는 중이면 한 번 더 수집합니다.
+                after = None
+            if after == before:
+                return manifest, before
+        raise _Blocked("원본이 바뀌는 중")
+
+
+def _collect(app: Flask, job: dict) -> None:
+    db = app.config["DB_PATH"]
+    snap = snapshot_path(app, job["id"])
+    try:
+        manifest, before = _snapshot_source(app, job, snap)
         _stop_if_cancelled(db, job["id"])
         # `.idw` 도 그것을 쓰는 레시피의 경로로 넣습니다. file 행은 대상마다 한 번만 생깁니다(store).
         recipe_paths = {
@@ -182,45 +191,108 @@ def _collect(app: Flask, job: dict) -> None:
         _block(db, job["id"], reason)
 
 
-class Scheduler:
-    """시작 판정과 슬롯 예약을 하는 한 곳. 메모리 상태는 이 프로세스에서 시작한 job 뿐입니다.
+def _intact(plan: dict, path: str) -> bool:
+    try:
+        data = (Path(plan["snapshot_dir"]) / path.lstrip("/")).read_bytes()
+    except OSError:
+        return False
+    return hashlib.sha256(data).hexdigest() == plan["manifest"][path]
 
-    대기 job 은 판정 때마다 SQLite 에서 id 순으로 다시 읽습니다. 재기동 전에 시작한 job
-    (`collecting`·전송 중으로 남은 것)은 여기 없어 장비도 슬롯도 쥐지 않습니다.
-    ponytail: 이어 돌리는 것과 그 job 의 상한 재검사(`pending` -> `failed`)는 티켓 12(재기동 대조 복구).
+
+def recollect(app: Flask, job_id: int, path: str) -> str | None:
+    """재수집 규칙(스펙 "재기동 대조 복구"). `path` 의 스냅샷이 손상·유실됐을 때 부릅니다.
+
+    원본을 별도 폴더에 다시 받아 manifest 해시가 기록과 같으면 그 폴더를 스냅샷으로 채택하고 None,
+    아니면 job 을 "전송 불가"로 두고 `path` 에 남길 실패 사유를 돌려줍니다. 기록된 manifest 는 덮어쓰지 않습니다.
+    """
+    db = app.config["DB_PATH"]
+    with _collect_lock:
+        plan = store.transfer_plan(db, job_id)
+        if plan["untransferable"]:
+            return store.UNTRANSFERABLE
+        if _intact(plan, path):  # 다른 작업자가 이미 다시 받았습니다.
+            return None
+        snap = Path(plan["snapshot_dir"])
+        fresh = snap.with_name(snap.name + ".recollect")
+        try:
+            same = manifest_hash(_snapshot_source(app, plan, fresh)[0]) == plan["manifest_hash"]
+            reason = None if same else "원본이 job 확인 때와 다름"
+        except _Cancelled:
+            shutil.rmtree(fresh, ignore_errors=True)
+            return "취소"
+        except Exception as exc:
+            app.logger.warning("re-collection of job %s failed", job_id, exc_info=True)
+            reason = f"원본 재수집 실패: {exc}" if isinstance(exc, _Blocked) else f"원본 재수집 실패: {type(exc).__name__}"
+        if reason is None:
+            shutil.rmtree(snap, ignore_errors=True)
+            fresh.rename(snap)
+            return None
+        shutil.rmtree(fresh, ignore_errors=True)
+        store.mark_untransferable(db, job_id, reason)
+        return store.UNTRANSFERABLE
+
+
+class Scheduler:
+    """시작 판정과 슬롯 예약을 하는 한 곳. 메모리 상태는 이 프로세스에서 시작한 job 과 이어 돌릴 job 입니다.
+
+    첫 판정 전에 재기동 대조 복구를 합니다. 재기동 전에 시작한 job(수집 중, 또는 `pending` 이 남은 완료)은
+    `resumed` 에 두고 대기 job 과 같이 id 순으로 판정받습니다. 대기 job 은 판정 때마다 SQLite 에서 다시 읽습니다.
     """
 
     def __init__(self, app: Flask) -> None:
         self.app = app
         self.lock = threading.Lock()
         self.running: dict[int, scheduler.Entry] = {}
+        self.resumed: set[int] | None = None  # None: 아직 복구 전
+
+    def _recover(self) -> None:
+        db = self.app.config["DB_PATH"]
+        files = store.files_to_reconcile(db)
+        reconcile(self.app, files)
+        self.resumed = set(store.settle_after_reconcile(db))
+        # 대조로 전부 verified 가 된 job 은 이어 돌지 않으니 스냅샷을 여기서 지웁니다(스펙 "스냅샷 수집").
+        for job_id in {f["job_id"] for f in files} - self.resumed:
+            if store.get_job(db, job_id)["progress"]["success"]:
+                shutil.rmtree(snapshot_path(self.app, job_id), ignore_errors=True)
 
     def admit(self) -> list[dict]:
-        """시작할 수 있는 job 을 모두 수집 중으로 잡고 슬롯을 예약해 돌려줍니다."""
+        """시작할 수 있는 job 을 모두 잡고 슬롯을 예약해 돌려줍니다. 대기 job 은 수집 중으로 바꿉니다."""
         db, cap = self.app.config["DB_PATH"], self.app.config["MAX_THREADS"]
         with self.lock:
-            waiting = {
-                j["id"]: scheduler.Entry(j["id"], frozenset([j["source_eqp"], *j["targets"]]), len(j["targets"]), False)
-                for j in store.waiting_jobs(db)
+            if self.resumed is None:
+                self._recover()
+            rows = {j["id"]: j for j in store.waiting_jobs(db, self.resumed)}
+            entries = {
+                i: scheduler.Entry(i, frozenset([j["source_eqp"], *j["targets"]]), len(j["targets"]), False)
+                for i, j in rows.items()
             }
-            queue = sorted([*self.running.values(), *waiting.values()])
+            queue = sorted([*self.running.values(), *entries.values()])
             start, over = scheduler.admit(queue, cap)
             # 읽은 뒤 판정 전에 취소가 대기 job 을 차단했을 수 있습니다. 그 job 은 건너뜁니다.
             for job_id in over:
+                reason = f"상한 초과: 대상 {entries[job_id].n}대 > 스레드 상한 {cap}"
+                self.resumed.discard(job_id)
                 try:
-                    store.block_collection(db, job_id, "waiting", f"상한 초과: 대상 {waiting[job_id].n}대 > 스레드 상한 {cap}")
+                    if rows[job_id]["collection"] == "done":  # 재기동하며 상한을 줄였고 file 행이 있습니다.
+                        store.fail_pending(db, job_id, reason)
+                    else:
+                        store.block_collection(db, job_id, rows[job_id]["collection"], reason)
                 except RuntimeError:
                     pass
             claimed = []
             for job_id in start:
                 try:
-                    claimed.append(store.claim_job(db, job_id))
+                    if rows[job_id]["collection"] == "waiting":
+                        claimed.append(store.claim_job(db, job_id))
+                    else:
+                        claimed.append(store.load_job(db, job_id))
                 except RuntimeError:
                     continue
-                except Exception:  # 트랜잭션이 되돌려져 이 job 과 뒤 job 은 대기로 남고 다음 판정에서 다시 봅니다.
+                except Exception:  # 트랜잭션이 되돌려져 이 job 과 뒤 job 은 그대로 남고 다음 판정에서 다시 봅니다.
                     self.app.logger.exception("claim of job %s failed", job_id)
                     break
-                self.running[job_id] = waiting[job_id]._replace(started=True)
+                self.resumed.discard(job_id)
+                self.running[job_id] = entries[job_id]._replace(started=True)
             return claimed
 
     def spawn(self) -> None:
@@ -231,9 +303,12 @@ class Scheduler:
             except Exception:
                 self.app.logger.exception("job %s: thread start failed", job["id"])
                 try:
-                    _block(self.app.config["DB_PATH"], job["id"], "작업자 시작 실패")
+                    if job["collection"] == "done":  # 재기동 뒤 이어 보내려던 job
+                        store.fail_pending(self.app.config["DB_PATH"], job["id"], "작업자 시작 실패")
+                    else:
+                        _block(self.app.config["DB_PATH"], job["id"], "작업자 시작 실패")
                 except Exception:
-                    # 차단 기록마저 실패하면 job 은 '수집 중'으로 남고 재기동 대조(티켓 12)가 거둡니다.
+                    # 차단 기록마저 실패하면 job 은 '수집 중'으로 남고 다음 기동의 복구가 다시 수집합니다.
                     # 뒤 job 들의 인계는 계속합니다.
                     self.app.logger.exception("job %s: could not record the start failure", job["id"])
                 finally:
@@ -247,9 +322,13 @@ class Scheduler:
             self.app.logger.exception("job %s failed", job["id"])
 
     def run(self, job: dict, *, parallel: bool) -> None:
-        """수집(슬롯 하나) 뒤 대상 작업자들. 마지막 작업자가 끝나면 예약을 풉니다."""
+        """수집(슬롯 하나) 뒤 대상 작업자들. 마지막 작업자가 끝나면 예약을 풉니다.
+
+        재기동 전에 수집을 마친 job 은 바로 전송합니다. 수집 중이던 job 은 처음부터 다시 수집합니다.
+        """
         try:
-            collect(self.app, job)
+            if job["collection"] != "done":
+                collect(self.app, job)
             transfer_job(self.app, job["id"], parallel=parallel)
             # 전부 verified 면 스냅샷을 바로 지웁니다. 아니면 실행자가 닫을 때(스펙 "스냅샷 수집").
             if (done := store.get_job(self.app.config["DB_PATH"], job["id"])) and done["progress"]["success"]:

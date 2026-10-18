@@ -110,10 +110,7 @@ def test_a_re_download_that_differs_is_a_hash_mismatch(make, fleet):
     ]
 
 
-def test_a_damaged_snapshot_writes_nothing_and_fails_the_rest_of_the_job(make, fleet, tmp_path):
-    # 같은 크기로 바뀐 스냅샷 + 대상에 이미 있는 정상 파일. 어느 것도 대상에 닿지 않아야 합니다.
-    fleet["6MCDE305"].add(layout.idw_path("ABC_GATE", "W1"), b"IDW", T)
-    before = {e: recipe_files(t) for e, t in fleet.items()}
+def test_a_damaged_snapshot_is_re_collected_and_the_copy_goes_on(make, fleet, tmp_path):
     app, c = make()
     job_id = start(c)
     collect(app, store.claim_next_waiting(app.config["DB_PATH"]))
@@ -122,10 +119,29 @@ def test_a_damaged_snapshot_writes_nothing_and_fails_the_rest_of_the_job(make, f
     transfer_job(app, job_id)
 
     job = c.get(f"/api/jobs/{job_id}").json
-    assert job["file_counts"] == counts(failed=10)
-    assert {p["reason"] for p in job["problems"]} == {"스냅샷 손상"}
+    assert (job["file_counts"], job["untransferable"]) == (counts(verified=10), None)
+    assert recipe_files(fleet["6MCDE305"]) == recipe_files(fleet["4CCD6701"]) == source_recipe_files(fleet)
+
+
+def test_a_damaged_snapshot_of_a_changed_source_writes_nothing_and_makes_the_job_untransferable(make, fleet, tmp_path):
+    # 같은 크기로 바뀐 스냅샷 + 덮어쓰기 허락 + 대상에 이미 있는 정상 파일. 어느 것도 대상에 닿지 않아야 합니다.
+    fleet["6MCDE305"].add_recipe("ABC_GATE", "W1", "P1", P1_RAW, T)
+    before = {e: recipe_files(t) for e, t in fleet.items()}
+    app, c = make()
+    job_id = start(c, targets=["6MCDE305"], overwrite=[{"eqp": "6MCDE305", "idw": "W1", "idp": "P1"}])
+    collect(app, store.claim_next_waiting(app.config["DB_PATH"]))
+    (tmp_path / "snapshots" / str(job_id) / P1_IDP.lstrip("/")).write_bytes(b"IDP P9\n")
+    fleet["6MCDE301"].add(P1_IDP, b"IDP P1 v2\n", T)
+    before["6MCDE301"][P1_IDP] = b"IDP P1 v2\n"
+
+    transfer_job(app, job_id)
+
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert job["untransferable"] == "원본이 job 확인 때와 다름"
+    assert job["file_counts"] == counts(failed=5)
+    assert {p["reason"] for p in job["problems"]} == {"job 확인 뒤 원본이 바뀜"}
     assert {e: recipe_files(t) for e, t in fleet.items()} == before
-    assert fleet["4CCD6701"]._all_dirs() == {"/", "/HITACHI", "/HITACHI/DEVICE", layout.ROOT}
+    assert sorted(p.name for p in (tmp_path / "snapshots").iterdir()) == [str(job_id)]
 
 
 def test_a_raw_folder_that_appeared_after_confirmation_fails_that_pair_without_writing(make, fleet):
@@ -296,6 +312,7 @@ def test_an_oversized_snapshot_file_is_refused_without_reading_it_whole(make, fl
 
 
 def test_a_snapshot_file_that_grew_past_the_cap_after_collection_is_damage_not_size(make, fleet, tmp_path):
+    # 손상이라 크기 상한 실패가 아니라 재수집으로 갑니다.
     app, c = make(transfer_max_bytes=16)
     job_id = start(c, targets=["6MCDE305"])
     collect(app, store.claim_next_waiting(app.config["DB_PATH"]))
@@ -304,9 +321,8 @@ def test_a_snapshot_file_that_grew_past_the_cap_after_collection_is_damage_not_s
     transfer_job(app, job_id)
 
     job = c.get(f"/api/jobs/{job_id}").json
-    assert job["file_counts"] == counts(failed=5)
-    assert {p["reason"] for p in job["problems"]} == {"스냅샷 손상"}
-    assert recipe_files(fleet["6MCDE305"]) == {}
+    assert job["file_counts"] == counts(verified=5)
+    assert recipe_files(fleet["6MCDE305"]) == source_recipe_files(fleet)
 
 
 def test_a_login_refused_on_reconnect_after_put_leaves_that_file_uncertain(make, fleet):
