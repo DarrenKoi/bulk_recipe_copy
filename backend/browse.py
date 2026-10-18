@@ -3,7 +3,7 @@
 import ftplib
 import time
 
-from flask import Flask
+from flask import Flask, request
 
 from ftp_handler.core.client import FtpClient, ListingTooLarge, TransferTimeout
 
@@ -141,9 +141,11 @@ def register_browse(app: Flask) -> None:
             count, total = _raw_summary(ftp, layout.raw_dir(class_name, idw, idp))
             # 확인 팝업의 총 크기에 .idp 도 넣으려고 idw 폴더를 한 번 더 읽습니다. 없으면 None.
             idp_bytes = _file_size(ftp, layout.idw_dir(class_name, idw), f"{idp}.idp")
-            # include_idw 일 때 쓰려고 data/ 도 한 번 읽어 .idw 크기를 같은 예산 안에서 돌려줍니다. 없으면 None.
-            idw_bytes = _file_size(ftp, layout.data_dir(class_name), f"{idw}.idw")
-            return {"idw": idw, "idp": idp, "file_count": count, "total_bytes": total,
-                    "idp_bytes": idp_bytes, "idw_bytes": idw_bytes}
+            out = {"idw": idw, "idp": idp, "file_count": count, "total_bytes": total, "idp_bytes": idp_bytes}
+            # ?idw=1 (include_idw 인 확인 팝업)일 때만 data/ 를 읽어 .idw 크기를 같은 예산 안에서 돌려줍니다.
+            # 끈 요청이 data/ LIST 거부나 예산 때문에 실패하지 않게 합니다. 없으면 None.
+            if request.args.get("idw") == "1":
+                out["idw_bytes"] = _file_size(ftp, layout.data_dir(class_name), f"{idw}.idw")
+            return out
 
         return browse(eqp, op)

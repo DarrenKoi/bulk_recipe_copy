@@ -37,18 +37,18 @@ const pairs = computed<Pair[]>(() => readable.value
     .map(r => ({ eqp: t.eqp, ...r }))))
 
 // 파일 수·크기는 수집 전이라 서버가 모릅니다. 고른 레시피마다 원본의 요약 API(raw 폴더 + .idp·.idw 크기)로 셉니다.
-type Summary = { file_count: number, total_bytes: number, idp_bytes: number | null, idw_bytes: number | null }
+type Summary = { file_count: number, total_bytes: number, idp_bytes: number | null, idw_bytes?: number | null }
 // 레시피 키 -> 요약, 실패 사유(string), 또는 아직 없음(undefined)
 const summaries = ref<Record<string, Summary | string>>({})
 const rkey = (r: Recipe) => `${r.idw}/${r.idp}`
 const api = (...parts: string[]) => `/api/tools/${[props.eqp, ...parts].map(encodeURIComponent).join('/')}`
 function load(r: Recipe) {
   delete summaries.value[rkey(r)]
-  $fetch<Summary>(api('classes', props.cls, 'recipes', r.idw, r.idp))
+  $fetch<Summary>(api('classes', props.cls, 'recipes', r.idw, r.idp), { query: props.includeIdw ? { idw: '1' } : {} })
     .then((s) => {
       summaries.value[rkey(r)] = s.idp_bytes === null
         ? '원본에서 .idp 를 찾지 못했습니다.'
-        : props.includeIdw && s.idw_bytes === null ? `원본에서 ${r.idw}.idw 를 찾지 못했습니다.` : s
+        : props.includeIdw && s.idw_bytes == null ? `원본에서 ${r.idw}.idw 를 찾지 못했습니다.` : s
     })
     .catch((e) => { summaries.value[rkey(r)] = e?.data?.error?.message ?? e?.message ?? '조회 실패' })
 }

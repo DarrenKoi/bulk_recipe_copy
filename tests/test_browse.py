@@ -86,11 +86,31 @@ def test_class_without_recipes_is_an_empty_list(client):
 def test_recipe_detail_counts_raw_files_including_subfolders(client):
     resp = client.get("/api/tools/6MCDE301/classes/ABC_GATE/recipes/W1/P1")
     assert resp.status_code == 200
-    assert resp.json == {"idw": "W1", "idp": "P1", "file_count": 2, "total_bytes": 8, "idp_bytes": 7, "idw_bytes": 3}
+    assert resp.json == {"idw": "W1", "idp": "P1", "file_count": 2, "total_bytes": 8, "idp_bytes": 7}
     empty = client.get("/api/tools/6MCDE301/classes/ABC_GATE/recipes/W1/P2")
-    assert empty.json == {"idw": "W1", "idp": "P2", "file_count": 0, "total_bytes": 0, "idp_bytes": 7, "idw_bytes": 3}
+    assert empty.json == {"idw": "W1", "idp": "P2", "file_count": 0, "total_bytes": 0, "idp_bytes": 7}
+
+
+def test_recipe_detail_reports_the_idw_size_only_when_asked(client):
+    resp = client.get("/api/tools/6MCDE301/classes/ABC_GATE/recipes/W1/P1?idw=1")
+    assert resp.json == {"idw": "W1", "idp": "P1", "file_count": 2, "total_bytes": 8, "idp_bytes": 7, "idw_bytes": 3}
     # W2 는 원본에 .idw 가 없습니다.
-    assert client.get("/api/tools/6MCDE301/classes/ABC_GATE/recipes/W2/P1").json["idw_bytes"] is None
+    assert client.get("/api/tools/6MCDE301/classes/ABC_GATE/recipes/W2/P1?idw=1").json["idw_bytes"] is None
+
+
+def test_a_refused_data_listing_only_fails_requests_that_ask_for_the_idw(client, fleet):
+    src = fleet["6MCDE301"]
+    plain = src.list_details
+
+    def refuse_data(remote_dir, *args, **kwargs):
+        if remote_dir == layout.data_dir("ABC_GATE"):
+            from ftplib import error_perm
+            raise error_perm("550 Permission denied")
+        return plain(remote_dir, *args, **kwargs)
+
+    src.list_details = refuse_data
+    assert client.get("/api/tools/6MCDE301/classes/ABC_GATE/recipes/W1/P1").status_code == 200
+    assert client.get("/api/tools/6MCDE301/classes/ABC_GATE/recipes/W1/P1?idw=1").status_code == 502
 
 
 @pytest.mark.parametrize(
@@ -171,8 +191,8 @@ def test_entry_budget_counts_every_recipe_the_listing_returns(make_client):
 
 def test_a_browse_that_uses_the_budget_exactly_succeeds(make_client, fleet):
     # raw 폴더 항목은 빈 하위 폴더 하나(그 LIST는 남은 예산 0으로 돕니다), .idp 크기를 읽는 idw 폴더
-    # W1 은 P1.idp·P1·P2.idp·P2 넷, .idw 크기를 읽는 data/ 는 W1·W2·W1.idw 셋이라 예산 8로 끝나야 합니다.
+    # W1 은 P1.idp·P1·P2.idp·P2 넷이라 예산 5로 끝나야 합니다.
     fleet["6MCDE301"].dirs.add(layout.raw_dir("ABC_GATE", "W1", "P2") + "/empty")
-    resp = make_client(browse_max_entries=8).get("/api/tools/6MCDE301/classes/ABC_GATE/recipes/W1/P2")
+    resp = make_client(browse_max_entries=5).get("/api/tools/6MCDE301/classes/ABC_GATE/recipes/W1/P2")
     assert resp.status_code == 200
     assert resp.json["file_count"] == 0
