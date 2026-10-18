@@ -3,6 +3,7 @@ from test_transfer import ROSTER, counts, fleet, recipe_files  # noqa: F401  (fl
 
 from backend import create_app, layout, store
 from backend.jobs import collect, run_until_idle
+from backend.transfer import transfer_job
 
 
 @pytest.fixture
@@ -133,20 +134,42 @@ def test_a_cancel_during_a_reconnect_still_verifies_the_claimed_file(app, c, fle
     assert job["progress"]["finished"] is True
 
 
-def test_a_cancel_racing_the_last_file_is_refused_and_leaves_no_flag(app, c, monkeypatch):
+def test_a_cancel_accepted_just_before_the_first_claim_writes_nothing(app, c, fleet, monkeypatch):
     job_id = start(c)
+    claim_file = store.claim_file
+
+    # 작업자가 플래그를 false 로 읽은 뒤, 첫 파일을 잡기 직전에 취소가 수락됩니다.
+    def cancel_first(*args):
+        monkeypatch.setattr(store, "claim_file", claim_file)
+        assert c.post(f"/api/jobs/{job_id}/cancel").status_code == 200
+        return claim_file(*args)
+
+    monkeypatch.setattr(store, "claim_file", cancel_first)
+    run_until_idle(app)
+
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert {t["eqp"]: t["counts"] for t in job["tree"]} == {"4CCD6701": counts(failed=5), "6MCDE305": counts(failed=5)}
+    assert {p["reason"] for p in job["problems"]} == {"취소"}
+    assert recipe_files(fleet["4CCD6701"]) == {}
+    assert recipe_files(fleet["6MCDE305"]) == {}
+
+
+def test_a_cancel_the_worker_finishes_before_the_response_is_still_accepted(app, c, monkeypatch):
+    job_id = start(c)
+    collect(app, store.claim_next_waiting(app.config["DB_PATH"]))
     request_cancel = store.request_cancel
 
-    def finish_first(db, jid, requested=True):
-        if requested:  # 플래그를 세우기 직전에 job 이 끝납니다.
-            run_until_idle(app)
-        request_cancel(db, jid, requested)
+    def worker_cancels_at_once(db, jid):
+        accepted = request_cancel(db, jid)
+        transfer_job(app, jid)  # 플래그를 본 작업자가 응답 전에 남은 파일을 모두 취소합니다.
+        return accepted
 
-    monkeypatch.setattr(store, "request_cancel", finish_first)
+    monkeypatch.setattr(store, "request_cancel", worker_cancels_at_once)
     resp = c.post(f"/api/jobs/{job_id}/cancel")
-    assert (resp.status_code, resp.json["error"]["code"]) == (409, "finished")
-    job = c.get(f"/api/jobs/{job_id}").json
-    assert (job["progress"]["success"], job["cancel_requested"]) == (True, False)
+    assert resp.status_code == 200
+    assert resp.json["cancel_requested"] is True
+    assert resp.json["file_counts"] == counts(failed=10)
+    assert {p["reason"] for p in resp.json["problems"]} == {"취소"}
 
 
 def test_only_the_executor_may_cancel_or_close(app, c):

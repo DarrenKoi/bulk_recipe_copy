@@ -168,8 +168,10 @@ class _Worker:
 
     def send(self, ftp, recipe: tuple[str, str | None], recipe_paths: list[str], path: str) -> None:
         if path != self.claimed:
-            if not store.move_file(self.db, self.job_id, self.eqp, path, "pending", "in_progress"):
-                return  # 이미 실패 처리됨(재확인, 스냅샷 손상)
+            if not store.claim_file(self.db, self.job_id, self.eqp, path):
+                # 이미 실패 처리됐거나(재확인, 스냅샷 손상) 취소가 수락됐습니다. 취소면 남은 pending 을 끝냅니다.
+                self._cancelled_before(path)
+                return
             self.claimed, self.put_done = path, False
         if not self.put_done:
             try:

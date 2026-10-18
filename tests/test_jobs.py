@@ -421,3 +421,26 @@ def test_an_idp_briefly_missing_after_the_first_pass_is_collected_again(app_clie
     job = c.get(f"/api/jobs/{job_id}").json
     assert job["collection"] == {"state": "done", "reason": None}
     assert job["manifest"]["file_count"] == 5
+
+
+def test_snapshot_total_skips_files_and_folders_deleted_while_counting(tmp_path, monkeypatch):
+    import os
+
+    from backend import jobs
+
+    (tmp_path / "1" / "gone").mkdir(parents=True)
+    (tmp_path / "1" / "kept").write_bytes(b"1234")
+    (tmp_path / "1" / "deleted").write_bytes(b"12345678")
+    (tmp_path / "1" / "gone" / "x").write_bytes(b"12345678")
+    walk = os.walk
+
+    # 목록을 읽은 뒤 stat 전에 닫기가 파일과 폴더를 지웁니다.
+    def walk_then_delete(*args, **kwargs):
+        for d, dirs, names in walk(*args, **kwargs):
+            if d.endswith("1"):
+                os.remove(os.path.join(d, "deleted"))
+                jobs.shutil.rmtree(os.path.join(d, "gone"))
+            yield d, dirs, names
+
+    monkeypatch.setattr(jobs.os, "walk", walk_then_delete)
+    assert jobs.snapshot_bytes(tmp_path) == 4

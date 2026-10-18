@@ -1,6 +1,7 @@
 """job 생성(신뢰 경계 검사), 스냅샷 수집, 스케줄러, job 조회 API."""
 
 import hashlib
+import os
 import shutil
 import sqlite3
 import threading
@@ -23,8 +24,21 @@ def manifest_hash(manifest: list[tuple[str, int, str]]) -> str:
     return hashlib.sha256(lines.encode()).hexdigest()
 
 
+def _raise_unless_gone(exc: OSError) -> None:
+    if not isinstance(exc, FileNotFoundError):
+        raise exc
+
+
 def snapshot_bytes(root: Path) -> int:
-    return sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+    """스냅샷 총량. 닫기·자동 삭제가 lock 밖에서 지우는 중이라 세는 사이 사라진 파일·폴더는 뺍니다."""
+    total = 0
+    for d, _, names in os.walk(root, onerror=_raise_unless_gone):
+        for name in names:
+            try:
+                total += os.stat(os.path.join(d, name)).st_size
+            except FileNotFoundError:
+                pass
+    return total
 
 
 class _Blocked(Exception):
@@ -119,7 +133,7 @@ def _collect(app: Flask, job: dict) -> None:
         _stop_if_cancelled(db, job["id"])
         cap = app.config["SNAPSHOT_CAP_BYTES"]
         try:
-            left = cap - (snapshot_bytes(root) if root.exists() else 0)
+            left = cap - snapshot_bytes(root)
         except OSError as exc:
             app.logger.exception("snapshot size check failed")
             raise _Blocked(f"수집 오류: 로컬 저장 실패({type(exc).__name__})") from exc
@@ -413,13 +427,9 @@ def register_jobs(app: Flask) -> None:
         job, err = own_job(job_id)
         if err:
             return err
-        if job["progress"]["finished"]:
-            return error_json("finished", f"job {job_id} 은 이미 끝났습니다.", 409)
         db = app.config["DB_PATH"]
-        store.request_cancel(db, job_id)
-        # 확인과 플래그 사이에 끝났을 수 있습니다. 끝난 job 에 취소 요청을 남기지 않습니다.
-        if store.get_job(db, job_id)["progress"]["finished"]:
-            store.request_cancel(db, job_id, requested=False)
+        # 수락은 이 UPDATE 하나로 정합니다. 수락한 뒤 작업자가 응답 전에 취소를 마쳐도 200 입니다.
+        if not store.request_cancel(db, job_id):
             return error_json("finished", f"job {job_id} 은 이미 끝났습니다.", 409)
         if job["collection"]["state"] == "waiting":
             try:

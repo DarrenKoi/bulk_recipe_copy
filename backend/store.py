@@ -184,9 +184,20 @@ def finish_collection(db_path, job_id, *, manifest, manifest_hash, snapshot_dir,
         _move(conn, job_id, "collecting", "done", manifest_hash=manifest_hash, snapshot_dir=str(snapshot_dir))
 
 
-def request_cancel(db_path, job_id: int, requested: bool = True) -> None:
+_UNFINISHED = (
+    "collection != 'blocked' AND (collection != 'done' OR EXISTS "
+    "(SELECT 1 FROM files WHERE files.job_id = jobs.id AND state IN ('pending', 'in_progress')))"
+)
+
+
+def request_cancel(db_path, job_id: int) -> bool:
+    """끝나지 않은 job 에만 취소 플래그를 세웁니다. 판정과 기록이 한 UPDATE 라 수락 여부가 원자적입니다.
+
+    `_UNFINISHED` 는 `results.job_progress` 의 finished 를 뒤집은 것입니다.
+    """
     with connect(db_path) as conn:
-        conn.execute("UPDATE jobs SET cancel_requested = ? WHERE id = ?", (requested, job_id))
+        cur = conn.execute(f"UPDATE jobs SET cancel_requested = 1 WHERE id = ? AND {_UNFINISHED}", (job_id,))
+    return cur.rowcount == 1
 
 
 def cancel_requested(db_path, job_id: int) -> bool:
@@ -243,6 +254,17 @@ def move_file(db_path, job_id, eqp, path, frm: str, to: str, *, reason=None, tem
             "UPDATE files SET state = ?, reason = ?, temp_path = ? "
             "WHERE job_id = ? AND target_eqp = ? AND path = ? AND state = ?",
             (to, reason, temp_path, job_id, eqp, path, frm),
+        )
+    return cur.rowcount == 1
+
+
+def claim_file(db_path, job_id, eqp, path) -> bool:
+    """새 file 을 `pending` -> `in_progress` 로. 취소가 수락된 job 이면 잡지 않습니다(같은 UPDATE 로 판정)."""
+    with connect(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE files SET state = 'in_progress' WHERE job_id = ? AND target_eqp = ? AND path = ? "
+            "AND state = 'pending' AND NOT (SELECT cancel_requested FROM jobs WHERE id = ?)",
+            (job_id, eqp, path, job_id),
         )
     return cur.rowcount == 1
 
