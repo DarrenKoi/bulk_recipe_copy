@@ -73,6 +73,7 @@ class _Worker:
         self.db, self.job_id = app.config["DB_PATH"], plan["id"]
         self.seconds, self.max_bytes = app.config["TRANSFER_SECONDS"], app.config["TRANSFER_MAX_BYTES"]
         self.checked: set[tuple[str, str]] = set()  # 첫 쓰기 전 재확인을 마친 (idw, idp)
+        self.rejected: set[tuple[str, str]] = set()  # 첫 쓰기 전 재확인에서 빠진 (idw, idp)
         self.made: set[str] = set()  # 이미 mkdir 한 폴더
         # class 폴더(`{class}/`, `{class}/data/`)는 허락받은 대상만 만듭니다. 허락이 없으면 레시피마다
         # 첫 쓰기 전에 `{class}/data/` 가 있는지 보고, mkdir 도 그 아래만 만듭니다. 한 번 있었다는
@@ -169,6 +170,10 @@ class _Worker:
                 return
             if data is None:
                 return self._end(path, "failed", "전송 크기 상한 초과")
+            if recipe[1] is None:
+                users = {(w, p) for e, w, p in self.plan["pairs"] if e == self.eqp and w == recipe[0]}
+                if users <= self.rejected:  # 이 `.idw` 를 쓰는 쌍이 모두 재확인에서 빠졌으면 쓰지 않습니다.
+                    return self._end(path, "failed", _APPEARED)
             data_dir = layout.data_dir(self.plan["class_name"])
             if not self.may_create_class and recipe not in self.class_seen:
                 if _names(ftp, data_dir, self.seconds) is None:
@@ -183,6 +188,8 @@ class _Worker:
                 if _recipe_present(ftp, cls, *recipe, self.seconds, with_idw):
                     self._end(path, "failed", _APPEARED)
                     store.fail_pending(self.db, self.job_id, _APPEARED, eqp=self.eqp, paths=recipe_paths)
+                    if recipe[1] is not None:
+                        self.rejected.add(recipe)
                     return
                 self.checked.add(recipe)
             parent = posixpath.dirname(path)

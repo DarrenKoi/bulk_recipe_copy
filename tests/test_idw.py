@@ -99,3 +99,17 @@ def test_a_non_boolean_include_idw_is_refused(make):
                                      "recipes": [{"idw": "W1", "idp": "P1"}], "targets": ["6MCDE305"],
                                      "include_idw": "yes"})
     assert (resp.status_code, resp.json["error"]["code"]) == (400, "bad_request")
+
+
+def test_the_shared_idw_is_not_written_when_every_pair_using_it_was_rejected(make, fleet):
+    # 확인 뒤 대상에 두 레시피의 .idp 가 생겼고 .idw 는 없습니다. 쌍이 모두 빠졌으니 .idw 도 쓰면 안 됩니다.
+    planted = {layout.idp_path("ABC_GATE", "W1", p): b"THEIRS" for p in ("P1", "P2")}
+    for path, data in planted.items():
+        fleet["6MCDE305"].add(path, data, T)
+    app, c = make()
+    job_id = start(c, targets=("6MCDE305",), include_idw=True)
+    run_until_idle(app)
+
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert job["file_counts"] == counts(failed=6)
+    assert recipe_files(fleet["6MCDE305"]) == planted
