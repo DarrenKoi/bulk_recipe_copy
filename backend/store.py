@@ -5,10 +5,11 @@ file 행이 생기기 전 단계를 나타내는 `jobs.collection` 입니다.
 """
 
 import sqlite3
-from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+
+from . import results
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -64,9 +65,16 @@ CREATE TABLE IF NOT EXISTS files (
   temp_path TEXT,
   PRIMARY KEY (job_id, target_eqp, path)
 );
+-- 레시피를 다 보낸 뒤 대상 raw 폴더를 LIST해 센 "대상에만 있는 파일" 수. LIST 하지 못했으면 행이 없습니다.
+CREATE TABLE IF NOT EXISTS target_only (
+  job_id INTEGER NOT NULL REFERENCES jobs(id),
+  eqp TEXT NOT NULL,
+  idw TEXT NOT NULL,
+  idp TEXT NOT NULL,
+  count INTEGER NOT NULL,
+  PRIMARY KEY (job_id, eqp, idw, idp)
+);
 """
-
-FILE_STATES = ("pending", "in_progress", "verified", "failed", "uncertain")
 
 # 수집 결과의 전이는 이 표 하나로만 일어납니다. done·blocked 는 종료입니다.
 _COLLECTION_NEXT = {"waiting": {"collecting", "blocked"}, "collecting": {"done", "blocked"}}
@@ -232,8 +240,7 @@ def fail_pending(db_path, job_id, reason: str, *, eqp=None, paths=None) -> None:
 
 def _summary(conn, row) -> dict:
     job_id = row["id"]
-    counts = Counter({s: 0 for s in FILE_STATES})
-    counts.update({r["state"]: r["n"] for r in conn.execute(
+    counts = results.counts({r["state"]: r["n"] for r in conn.execute(
         "SELECT state, count(*) AS n FROM files WHERE job_id = ? GROUP BY state", (job_id,))})
     m = conn.execute("SELECT count(*) AS n, coalesce(sum(size), 0) AS b FROM manifest WHERE job_id = ?",
                      (job_id,)).fetchone()
@@ -250,7 +257,8 @@ def _summary(conn, row) -> dict:
         "target_count": conn.execute("SELECT count(*) FROM job_targets WHERE job_id = ?", (job_id,)).fetchone()[0],
         "recipe_count": conn.execute(
             "SELECT count(*) FROM (SELECT DISTINCT idw, idp FROM job_pairs WHERE job_id = ?)", (job_id,)).fetchone()[0],
-        "file_counts": dict(counts),
+        "file_counts": counts,
+        "progress": results.job_progress(row["collection"], counts),
         "cancel_requested": bool(row["cancel_requested"]),
         "closed": bool(row["closed"]),
     }
@@ -273,8 +281,32 @@ def get_job(db_path, job_id: int) -> dict | None:
                 "SELECT DISTINCT idw, idp FROM job_pairs WHERE job_id = ? ORDER BY idw, idp", (job_id,))],
             "pairs": [{"eqp": r["eqp"], "idw": r["idw"], "idp": r["idp"]} for r in conn.execute(
                 "SELECT eqp, idw, idp FROM job_pairs WHERE job_id = ? ORDER BY eqp, idw, idp", (job_id,))],
-            # 결과 트리(티켓 08) 전까지 실패·불명확 file 만 평평하게 보여 줍니다.
+            "tree": _tree(conn, row),
+            # 실패·불명확 file 만 평평하게. 트리에도 같은 내용이 있습니다.
             "problems": [dict(r) for r in conn.execute(
                 "SELECT target_eqp AS eqp, path, state, reason, temp_path FROM files "
                 "WHERE job_id = ? AND state IN ('failed', 'uncertain') ORDER BY target_eqp, path", (job_id,))],
         }
+
+
+def _tree(conn, row) -> list[dict]:
+    job_id = row["id"]
+    return results.tree(
+        row["class_name"],
+        [r["eqp"] for r in conn.execute("SELECT eqp FROM job_targets WHERE job_id = ? ORDER BY eqp", (job_id,))],
+        [tuple(r) for r in conn.execute(
+            "SELECT eqp, idw, idp FROM job_pairs WHERE job_id = ? ORDER BY eqp, idw, idp", (job_id,))],
+        [dict(r) for r in conn.execute(
+            "SELECT target_eqp AS eqp, path, state, reason, temp_path FROM files WHERE job_id = ? ORDER BY path",
+            (job_id,))],
+        {(r["eqp"], r["idw"], r["idp"]): r["count"] for r in conn.execute(
+            "SELECT eqp, idw, idp, count FROM target_only WHERE job_id = ?", (job_id,))},
+    )
+
+
+def record_target_only(db_path, job_id, eqp, idw, idp, count: int) -> None:
+    with connect(db_path) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO target_only (job_id, eqp, idw, idp, count) VALUES (?, ?, ?, ?, ?)",
+            (job_id, eqp, idw, idp, count),
+        )

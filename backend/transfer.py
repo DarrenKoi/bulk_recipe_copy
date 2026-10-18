@@ -3,20 +3,30 @@
 import hashlib
 import posixpath
 import threading
+from itertools import islice
 from ftplib import Error as FtpError
 from ftplib import error_perm
 from pathlib import Path
 
 from flask import Flask
 
-from ftp_handler.core.client import TargetExists, TransferTimeout, TransferTooLarge, TransferUncertain
+from ftp_handler.core.client import (
+    ListingTooLarge,
+    TargetExists,
+    TransferTimeout,
+    TransferTooLarge,
+    TransferUncertain,
+)
 
 from . import layout, store
+from .browse import walk_files
 from .roster import hitachi_tools
 
 # 재연결해서 같은 파일부터 다시 할 오류. error_perm(5xx)은 장비의 거부라 재시도해도 같습니다.
 _CONNECTION_ERRORS = (OSError, EOFError, TransferTimeout, FtpError)
 _APPEARED = "확인 뒤 대상에 생김"
+# "대상에만 있는 파일" 을 셀 때 읽는 항목 상한. 넘으면 세지 않습니다(모름).
+_TARGET_ONLY_SCAN_CAP = 10_000
 
 
 class _Discarded(Exception):
@@ -65,14 +75,16 @@ class _Worker:
         self.put_done = False
 
     def queue(self) -> list[tuple[tuple[str, str], list[str]]]:
-        """(레시피, 그 레시피의 남은 경로들)을 파일마다 한 항목씩."""
+        """(레시피, 그 레시피의 남은 경로들, 경로)를 파일마다 한 항목씩. 레시피 끝마다 경로가 None 인
+        항목이 하나 더 있고, 그 자리에서 대상에만 있는 파일을 셉니다."""
         cls, pending = self.plan["class_name"], self.plan["pending"].get(self.eqp, [])
         out = []
         for eqp, idw, idp in self.plan["pairs"]:
             if eqp == self.eqp:
                 idp_path, raw = layout.idp_path(cls, idw, idp), layout.raw_dir(cls, idw, idp) + "/"
                 paths = [p for p in pending if p == idp_path or p.startswith(raw)]
-                out += [((idw, idp), paths, p) for p in paths]
+                if paths:
+                    out += [((idw, idp), paths, p) for p in paths] + [((idw, idp), paths, None)]
         return out
 
     def run(self) -> None:
@@ -118,7 +130,9 @@ class _Worker:
     def _end(self, path: str, to: str, reason: str | None = None, temp_path: str | None = None) -> None:
         store.move_file(self.db, self.job_id, self.eqp, path, "in_progress", to, reason=reason, temp_path=temp_path)
 
-    def send(self, ftp, recipe: tuple[str, str], recipe_paths: list[str], path: str) -> None:
+    def send(self, ftp, recipe: tuple[str, str], recipe_paths: list[str], path: str | None) -> None:
+        if path is None:
+            return self._count_target_only(ftp, recipe)
         if path != self.claimed:
             if not store.move_file(self.db, self.job_id, self.eqp, path, "pending", "in_progress"):
                 return  # 이미 실패 처리됨(재확인, 스냅샷 손상)
@@ -160,6 +174,22 @@ class _Worker:
             raise _Discarded from None
         ok = hashlib.sha256(got).hexdigest() == self.plan["manifest"][path]
         self._end(path, *(("verified",) if ok else ("failed", "해시 불일치")))
+
+    def _count_target_only(self, ftp, recipe: tuple[str, str]) -> None:
+        """대상 raw 폴더 아래 파일 중 이 레시피의 manifest 에 없는 것의 수. 세지 못하면 아무것도 적지 않습니다(0 이 아님)."""
+        raw = layout.raw_dir(self.plan["class_name"], *recipe)
+        cap = _TARGET_ONLY_SCAN_CAP
+        try:
+            found = list(islice(walk_files(ftp, raw, max_entries=cap, deadline=self.seconds), cap + 1))
+        except (ListingTooLarge, TransferTimeout):
+            raise _Discarded from None  # FtpClient 가 연결을 버렸습니다
+        except (error_perm, ValueError) as exc:
+            self.app.logger.warning("job %s %s: target-only LIST of %s failed: %s", self.job_id, self.eqp, raw, exc)
+            return
+        if len(found) > cap:
+            return
+        n = sum(f.path not in self.plan["manifest"] for f in found)
+        store.record_target_only(self.db, self.job_id, self.eqp, *recipe, n)
 
     def _snapshot(self, path: str) -> bytes | None:
         """스냅샷 바이트. manifest 크기가 전송 상한을 넘으면 None.

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { Progress, TargetResult } from './JobResult.vue'
+
 type Counts = Record<'pending' | 'in_progress' | 'verified' | 'failed' | 'uncertain', number>
 type Job = {
   id: number
@@ -12,12 +14,23 @@ type Job = {
   recipe_count: number
   file_counts: Counts
   queue_position?: number | null
+  progress: Progress
 }
-type Detail = Job & { targets: { eqp: string }[], recipes: { idw: string, idp: string }[] }
+type Detail = Job & {
+  targets: { eqp: string }[]
+  recipes: { idw: string, idp: string }[]
+  tree: TargetResult[]
+}
 
 const opened = defineModel<number | null>({ required: true })
 
 const COLLECTION = { waiting: '대기', collecting: '수집 중', done: '완료', blocked: '차단' } as const
+const STATUS = {
+  waiting: { text: '대기', cls: 'text-(--sk-ink-muted)' },
+  running: { text: '진행 중', cls: 'text-(--sk-ink)' },
+  done: { text: '완료', cls: 'text-(--sk-ok)' },
+  failed: { text: '실패', cls: 'text-(--sk-bad)' }
+} as const
 const POLL_MS = 3000
 
 const { data: list, error: listError, refresh: refreshList } = await useFetch<{ jobs: Job[] }>('/api/jobs')
@@ -26,9 +39,8 @@ const { data: detail, error: detailError, refresh: refreshDetail } = await useAs
   { watch: [opened] }
 )
 
-// 끝난 job 은 갱신하지 않습니다. 수집이 차단됐거나 모든 file 이 종료한 job 입니다.
-const finished = (j: Job) => j.collection.state === 'blocked'
-  || (j.collection.state === 'done' && j.file_counts.pending + j.file_counts.in_progress === 0)
+// 끝난 job(수집 차단 또는 모든 file 종료)은 갱신하지 않습니다.
+const finished = (j: Job) => j.progress.finished
 
 let timer: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
@@ -75,7 +87,7 @@ const collectionText = (j: Job) => j.queue_position
           <th>class</th>
           <th>레시피</th>
           <th>대상</th>
-          <th>수집</th>
+          <th>상태</th>
         </tr>
       </thead>
       <tbody>
@@ -110,8 +122,8 @@ const collectionText = (j: Job) => j.queue_position
           <td class="tabular-nums text-(--sk-ink)">
             {{ j.target_count }}
           </td>
-          <td :class="j.collection.state === 'blocked' ? 'text-(--sk-bad)' : 'text-(--sk-ink)'">
-            {{ collectionText(j) }}
+          <td :class="STATUS[j.progress.status].cls">
+            {{ j.queue_position ? `대기 ${j.queue_position}번째` : STATUS[j.progress.status].text }}
           </td>
         </tr>
       </tbody>
@@ -150,11 +162,10 @@ const collectionText = (j: Job) => j.queue_position
         <p class="sk-body text-(--sk-ink)">
           레시피: <span class="font-mono">{{ detail.recipes.map(r => `${r.idw}/${r.idp}`).join(', ') }}</span>
         </p>
-        <p class="sk-meta">
-          file 대기 {{ detail.file_counts.pending }} · 진행 {{ detail.file_counts.in_progress }} ·
-          검증 {{ detail.file_counts.verified }} · 실패 {{ detail.file_counts.failed }} ·
-          불명확 {{ detail.file_counts.uncertain }}
-        </p>
+        <JobResult
+          :tree="detail.tree"
+          :progress="detail.progress"
+        />
       </template>
     </div>
   </section>
