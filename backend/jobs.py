@@ -15,7 +15,7 @@ from ftp_handler.core.client import TransferTooLarge
 from . import layout, scheduler, store
 from .browse import walk_files
 from .roster import hitachi_tools
-from .transfer import reconcile, transfer_job
+from .transfer import reconcile, snapshot_file, transfer_job
 
 
 def manifest_hash(manifest: list[tuple[str, int, str]]) -> str:
@@ -191,14 +191,6 @@ def _collect(app: Flask, job: dict) -> None:
         _block(db, job["id"], reason)
 
 
-def _intact(plan: dict, path: str) -> bool:
-    try:
-        data = (Path(plan["snapshot_dir"]) / path.lstrip("/")).read_bytes()
-    except OSError:
-        return False
-    return hashlib.sha256(data).hexdigest() == plan["manifest"][path]
-
-
 def recollect(app: Flask, job_id: int, path: str) -> str | None:
     """재수집 규칙(스펙 "재기동 대조 복구"). `path` 의 스냅샷이 손상·유실됐을 때 부릅니다.
 
@@ -210,7 +202,7 @@ def recollect(app: Flask, job_id: int, path: str) -> str | None:
         plan = store.transfer_plan(db, job_id)
         if plan["untransferable"]:
             return store.UNTRANSFERABLE
-        if _intact(plan, path):  # 다른 작업자가 이미 다시 받았습니다.
+        if snapshot_file(plan, path) is not None:  # 다른 작업자가 이미 다시 받았습니다.
             return None
         snap = Path(plan["snapshot_dir"])
         fresh = snap.with_name(snap.name + ".recollect")
@@ -522,9 +514,9 @@ def register_jobs(app: Flask) -> None:
         job, err = own_job(job_id)
         if err:
             return err
-        if not job["progress"]["finished"]:
+        # 끝났는지는 닫기 UPDATE 가 같이 판정합니다(재기동 대조가 file 을 되살리는 것과 겹칠 수 있음).
+        if not store.close_job(app.config["DB_PATH"], job_id):
             return error_json("not_finished", f"job {job_id} 은 아직 끝나지 않았습니다.", 409)
-        store.close_job(app.config["DB_PATH"], job_id)
         shutil.rmtree(snapshot_path(app, job_id), ignore_errors=True)
         return store.get_job(app.config["DB_PATH"], job_id)
 

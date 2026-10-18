@@ -49,6 +49,16 @@ CREATE TABLE IF NOT EXISTS job_overwrites (
   idp TEXT NOT NULL,
   PRIMARY KEY (job_id, eqp, idw, idp)
 );
+-- 첫 쓰기 전 재확인의 결과. 'passed' 는 그 쌍의 첫 mkdir·put 전에 적습니다. 재기동 뒤 작업자는 이 표만 보고
+-- 재확인을 건너뛰거나(passed) 쌍을 뺀 채(rejected) 이어 갑니다. 덮어쓰기를 허락받은 쌍은 재확인이 없어 행도 없습니다.
+CREATE TABLE IF NOT EXISTS pair_checks (
+  job_id INTEGER NOT NULL REFERENCES jobs(id),
+  eqp TEXT NOT NULL,
+  idw TEXT NOT NULL,
+  idp TEXT NOT NULL,
+  result TEXT NOT NULL CHECK (result IN ('passed', 'rejected')),
+  PRIMARY KEY (job_id, eqp, idw, idp)
+);
 CREATE TABLE IF NOT EXISTS manifest (
   job_id INTEGER NOT NULL REFERENCES jobs(id),
   path TEXT NOT NULL,  -- 원격 절대 경로. 대상 경로도 같습니다
@@ -229,9 +239,11 @@ def cancel_requested(db_path, job_id: int) -> bool:
         return bool(conn.execute("SELECT cancel_requested FROM jobs WHERE id = ?", (job_id,)).fetchone()[0])
 
 
-def close_job(db_path, job_id: int) -> None:
+def close_job(db_path, job_id: int) -> bool:
+    """끝난 job 만 닫습니다. 판정과 기록이 한 UPDATE 라 재기동 대조가 file 을 되살리는 것과 겹쳐도 원자적입니다."""
     with connect(db_path) as conn:
-        conn.execute("UPDATE jobs SET closed = 1 WHERE id = ?", (job_id,))
+        cur = conn.execute(f"UPDATE jobs SET closed = 1 WHERE id = ? AND NOT ({_UNFINISHED})", (job_id,))
+    return cur.rowcount == 1
 
 
 def block_collection(db_path, job_id, frm: str, reason: str) -> None:
@@ -270,22 +282,24 @@ def transfer_plan(db_path, job_id: int) -> dict | None:
             "create_class": {r["eqp"] for r in conn.execute(
                 "SELECT eqp FROM job_targets WHERE job_id = ? AND may_create_class", (job_id,))},
             "pending": pending,
-            # 재기동 전에 put 이 대상에 닿은 file. 그 레시피는 첫 쓰기 전 재확인을 이미 지났습니다.
-            "written": {(r["target_eqp"], r["path"]) for r in conn.execute(
-                "SELECT target_eqp, path FROM files WHERE job_id = ? "
-                "AND (state IN ('verified', 'uncertain') OR reason = '해시 불일치')", (job_id,))},
+            "checks": {(r["eqp"], r["idw"], r["idp"]): r["result"] for r in conn.execute(
+                "SELECT eqp, idw, idp, result FROM pair_checks WHERE job_id = ?", (job_id,))},
         }
 
 
 def move_file(db_path, job_id, eqp, path, frm: str, to: str, *, reason=None, temp_path=None) -> bool:
-    """file 하나를 `frm` -> `to` 로. 이미 `frm` 이 아니면(다른 작업자가 실패 처리 등) False."""
+    """file 하나를 `frm` -> `to` 로. 이미 `frm` 이 아니거나(다른 작업자가 실패 처리 등) job 이 닫혔으면 False.
+
+    닫힌 job 은 끝난 것이라 작업자의 file 은 없고, 재기동 대조가 닫기와 겹친 경우만 여기서 막힙니다.
+    """
     if to not in _FILE_NEXT.get(frm, ()):
         raise ValueError(f"file 상태 전이 불가: {frm} -> {to}")
     with connect(db_path) as conn:
         cur = conn.execute(
             "UPDATE files SET state = ?, reason = ?, temp_path = ? "
-            "WHERE job_id = ? AND target_eqp = ? AND path = ? AND state = ?",
-            (to, reason, temp_path, job_id, eqp, path, frm),
+            "WHERE job_id = ? AND target_eqp = ? AND path = ? AND state = ? "
+            "AND NOT (SELECT closed FROM jobs WHERE id = ?)",
+            (to, reason, temp_path, job_id, eqp, path, frm, job_id),
         )
     return cur.rowcount == 1
 
@@ -299,6 +313,21 @@ def claim_file(db_path, job_id, eqp, path) -> bool:
             (job_id, eqp, path, job_id),
         )
     return cur.rowcount == 1
+
+
+def pass_check(db_path, job_id, eqp, idw, idp) -> None:
+    with connect(db_path) as conn:
+        conn.execute("INSERT OR REPLACE INTO pair_checks VALUES (?, ?, ?, ?, 'passed')", (job_id, eqp, idw, idp))
+
+
+def reject_pair(db_path, job_id, eqp, idw, idp, path, paths, reason: str) -> None:
+    """재확인에서 빠진 쌍: 거절을 적고, 잡아 둔 `path` 와 그 레시피의 남은 `pending`(`paths`)을 `failed(reason)` 로."""
+    with connect(db_path) as conn, _tx(conn):
+        conn.execute("INSERT OR REPLACE INTO pair_checks VALUES (?, ?, ?, ?, 'rejected')", (job_id, eqp, idw, idp))
+        conn.execute("UPDATE files SET state = 'failed', reason = ? WHERE job_id = ? AND target_eqp = ? AND path = ? "
+                     "AND state = 'in_progress'", (reason, job_id, eqp, path))
+        conn.executemany("UPDATE files SET state = 'failed', reason = ? WHERE job_id = ? AND target_eqp = ? "
+                         "AND path = ? AND state = 'pending'", [(reason, job_id, eqp, p) for p in paths])
 
 
 def fail_pending(db_path, job_id, reason: str, *, eqp=None, paths=None) -> None:

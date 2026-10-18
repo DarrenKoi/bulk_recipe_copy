@@ -60,6 +60,13 @@ onMounted(() => {
 })
 onUnmounted(() => clearInterval(timer))
 
+// 재기동 대조는 끝난 것으로 본 job 의 결과도 바꿉니다(verified·pending 으로). 열린 job 의 목록 항목이
+// 바뀌면 타이머가 멈춘 상세도 다시 읽습니다. 다른 job 을 연 것은 useAsyncData 의 watch 가 읽습니다.
+const listed = computed(() => JSON.stringify(list.value?.jobs.find(j => j.id === opened.value) ?? null))
+watch([opened, listed], ([id, now], [prevId, before]) => {
+  if (id === prevId && now !== before && detail.value && finished(detail.value)) refreshDetail()
+})
+
 // 재시도할 쌍: 수집이 막힌 job 은 남은 쌍 전부, 아니면 실패·불명확으로 끝난 장비에서 검증되지 않은 파일이 있는 레시피.
 // 취소로 남은 파일은 failed("취소")라 여기에 같이 실립니다.
 function retryPairs(d: Detail): Pair[] {

@@ -1,7 +1,9 @@
 """재기동 대조 복구. 같은 SQLite·같은 가짜 장비 위에 앱을 다시 만들어 시험합니다(스펙 "시험")."""
 
+import os
 import shutil
 import sqlite3
+import tracemalloc
 from ftplib import error_perm
 
 import pytest
@@ -18,7 +20,7 @@ from test_transfer import (  # noqa: F401  (fleet, make 는 pytest fixture)
     start,
 )
 
-from backend import store
+from backend import layout, store
 from backend.jobs import run_until_idle
 
 B_CSV = f"{P1_RAW_DIR}/sub/b.csv"
@@ -273,7 +275,129 @@ def test_a_database_from_before_this_column_existed_is_upgraded(make, tmp_path):
     make()
     with sqlite3.connect(db) as conn:
         conn.execute("ALTER TABLE jobs DROP COLUMN untransferable")
+        conn.execute("DROP TABLE pair_checks")
     app, c = make()
     job_id = start(c, targets=["6MCDE305"])
+    run_until_idle(app)
+    assert c.get(f"/api/jobs/{job_id}").json["file_counts"] == counts(verified=5)
     assert c.get(f"/api/jobs/{job_id}").json["untransferable"] is None
     assert store.get_job(db, job_id)["untransferable"] is None
+
+
+def test_a_pair_rejected_before_the_restart_still_keeps_its_shared_idw_off_the_target(make, fleet, monkeypatch):
+    tool, idw = fleet["6MCDE305"], layout.idw_path("ABC_GATE", "W1")
+    tool.add(P1_IDP, b"THEIRS", T)  # 확인 뒤 대상에 생긴 .idp: 유일한 쌍 P1 이 재확인에서 빠집니다
+    app, c = make()
+    job_id = start(c, targets=["6MCDE305"], include_idw=True, pairs=[{"eqp": "6MCDE305", "idw": "W1", "idp": "P1"}])
+    claim_file = store.claim_file
+
+    def die_before_the_idw(db, job, eqp, path):
+        if path == idw:
+            raise SystemExit("process killed")
+        return claim_file(db, job, eqp, path)
+
+    monkeypatch.setattr(store, "claim_file", die_before_the_idw)
+    crash(app)
+    monkeypatch.setattr(store, "claim_file", claim_file)
+    assert c.get(f"/api/jobs/{job_id}").json["file_counts"] == counts(failed=3, pending=1)
+
+    app, c, claimed = recover(make)
+    finish(app, claimed)
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert job["file_counts"] == counts(failed=4)
+    assert {p["reason"] for p in job["problems"]} == {"확인 뒤 대상에 생김"}
+    assert recipe_files(tool) == {P1_IDP: b"THEIRS"}
+
+
+def test_a_recipe_claimed_but_not_rechecked_before_the_restart_is_rechecked(make, fleet):
+    tool = fleet["6MCDE305"]
+    list_details = tool.list_details
+
+    def die_on_the_recheck(*a, **kw):
+        raise SystemExit("process killed")
+
+    tool.list_details = die_on_the_recheck
+    app, c = make()
+    job_id = start(c, targets=["6MCDE305"])
+    crash(app)
+    tool.list_details = list_details
+    assert states(c, job_id)[P1_IDP] == ("in_progress", None)
+    tool.add(f"{P1_RAW_DIR}/theirs.tif", b"THEIRS", T)  # 재기동 사이에 다른 사람이 raw 폴더를 만듦
+    download = tool.download
+
+    def flaky_p1_idp(path, **kw):
+        if path == P1_IDP:
+            raise ConnectionResetError("[Errno 54] Connection reset by peer")
+        return download(path, **kw)
+
+    tool.download = flaky_p1_idp
+    app, c, claimed = recover(make)
+    del tool.download
+    assert states(c, job_id)[P1_IDP] == ("uncertain", "재기동 때 전송 중")
+    finish(app, claimed)
+
+    assert states(c, job_id)[A_TIF] == ("failed", "확인 뒤 대상에 생김")
+    assert c.get(f"/api/jobs/{job_id}").json["file_counts"] == counts(verified=2, failed=2, uncertain=1)
+    assert recipe_files(tool) == {
+        f"{P1_RAW_DIR}/theirs.tif": b"THEIRS",
+        **{p: d for p, d in source_recipe_files(fleet).items() if "/P2" in p},
+    }
+
+
+def test_closing_a_job_during_reconciliation_keeps_it_closed_and_finished(make, fleet):
+    tool = fleet["6MCDE305"]
+    tool.lose_rename_reply.add(A_TIF)
+    app, c = make()
+    job_id = start(c, targets=["6MCDE305"])
+    run_until_idle(app)
+    assert states(c, job_id)[A_TIF][0] == "uncertain"
+    del tool.files[A_TIF]
+
+    app, c = make()
+
+    def close_while_downloading(path):
+        tool.on_download = None
+        assert c.post(f"/api/jobs/{job_id}/close").status_code == 200
+
+    tool.on_download = close_while_downloading
+    run_until_idle(app)
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert (job["closed"], job["progress"]["finished"]) == (True, True)
+    assert job["file_counts"] == counts(verified=4, uncertain=1)
+
+
+def test_a_reconcile_download_that_drops_the_connection_does_not_leave_the_next_file_uncertain(make, fleet):
+    tool = fleet["6MCDE305"]
+    tool.lose_rename_reply |= {A_TIF, B_CSV}
+    app, c = make()
+    job_id = start(c, targets=["6MCDE305"])
+    run_until_idle(app)
+    assert (states(c, job_id)[A_TIF][0], states(c, job_id)[B_CSV][0]) == ("uncertain", "uncertain")
+    tool.lose_rename_reply = set()
+    tool.add(A_TIF, bytes(64), T)  # 재기동 사이에 전송 상한보다 큰 파일로 바뀜
+
+    app, c, _ = recover(make, transfer_max_bytes=8)
+    assert states(c, job_id)[A_TIF] == ("pending", None)
+    assert states(c, job_id)[B_CSV] == ("verified", None)
+
+
+def test_re_collecting_a_snapshot_file_that_grew_huge_reads_only_its_expected_size(make, fleet, tmp_path):
+    tool = fleet["6MCDE305"]
+    app, c = make()
+    job_id = start(c, targets=["6MCDE305"])
+    huge = 256 * 1024**2
+
+    def grow_b_csv(path):
+        if path == P1_IDP:  # 첫 파일 검증 중: 뒤 파일의 스냅샷이 거대하게 손상됨(희소 파일이라 디스크는 거의 안 씀)
+            tool.on_download = None
+            os.truncate(tmp_path / "snapshots" / str(job_id) / B_CSV.lstrip("/"), huge)
+
+    tool.on_download = grow_b_csv
+    tracemalloc.start()
+    try:
+        run_until_idle(app)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert c.get(f"/api/jobs/{job_id}").json["file_counts"] == counts(verified=5)
+    assert peak < huge // 8

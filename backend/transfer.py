@@ -77,16 +77,11 @@ class _Worker:
         self.app, self.plan, self.eqp, self.tool = app, plan, eqp, tool
         self.db, self.job_id = app.config["DB_PATH"], plan["id"]
         self.seconds, self.max_bytes = app.config["TRANSFER_SECONDS"], app.config["TRANSFER_MAX_BYTES"]
-        # 첫 쓰기 전 재확인을 마친 (idw, idp). 재기동 전에 이미 써 넣은 레시피는 다시 보면 제 파일에 걸립니다.
-        written = {p for e, p in plan["written"] if e == eqp}
-        self.checked: set[tuple[str, str]] = {
-            (idw, idp) for e, idw, idp in plan["pairs"]
-            if e == eqp and any(_in_recipe(plan["class_name"], idw, idp, p) for p in written)
-        }
-        # 첫 쓰기 전 재확인에서 빠진 (idw, idp).
-        # ponytail: 재기동 전에 빠진 쌍은 기억하지 않아, 그 쌍만 쓰던 `.idw` 가 재기동 뒤 대상에 없으면 올라갑니다.
-        # 문제가 되면 재확인 탈락을 file 사유와 구분해 SQLite 에 남깁니다.
-        self.rejected: set[tuple[str, str]] = set()
+        # 첫 쓰기 전 재확인을 통과한·빠진 (idw, idp). 재기동 전 결과도 SQLite(`pair_checks`)에서 이어받습니다.
+        # 통과한 쌍을 재기동 뒤 다시 보면 이 job 이 올린 파일에 걸리고, 빠진 쌍을 잊으면 그 쌍만 쓰는 `.idw` 를 씁니다.
+        checks = {(w, p): r for (e, w, p), r in plan["checks"].items() if e == eqp}
+        self.checked = {k for k, r in checks.items() if r == "passed"}
+        self.rejected = {k for k, r in checks.items() if r == "rejected"}
         self.made: set[str] = set()  # 이미 mkdir 한 폴더
         # class 폴더(`{class}/`, `{class}/data/`)는 허락받은 대상만 만듭니다. 허락이 없으면 레시피마다
         # 첫 쓰기 전에 `{class}/data/` 가 있는지 보고, mkdir 도 그 아래만 만듭니다. 한 번 있었다는
@@ -213,11 +208,13 @@ class _Worker:
                 cls = self.plan["class_name"]
                 with_idw = layout.idw_path(cls, recipe[0]) in self.plan["manifest"]  # include_idw 인 job
                 if _recipe_present(ftp, cls, *recipe, self.seconds, with_idw):
-                    self._end(path, "failed", _APPEARED)
-                    store.fail_pending(self.db, self.job_id, _APPEARED, eqp=self.eqp, paths=recipe_paths)
-                    if recipe[1] is not None:
-                        self.rejected.add(recipe)
+                    if recipe[1] is None:
+                        return self._end(path, "failed", _APPEARED)
+                    store.reject_pair(self.db, self.job_id, self.eqp, *recipe, path, recipe_paths, _APPEARED)
+                    self.rejected.add(recipe)
                     return
+                if recipe[1] is not None:
+                    store.pass_check(self.db, self.job_id, self.eqp, *recipe)  # 첫 쓰기 전에 남깁니다
                 self.checked.add(recipe)
             parent = posixpath.dirname(path)
             if parent not in self.made:
@@ -270,17 +267,27 @@ class _Worker:
         상한은 manifest 크기로 판정하고, 읽기는 기대 크기 + 1 바이트까지만 합니다. 수집 뒤 커진 파일은
         크기 초과가 아니라 손상입니다.
         """
-        expected = self.plan["sizes"][path]
-        if expected > self.max_bytes:
+        if self.plan["sizes"][path] > self.max_bytes:
             return None
-        try:
-            with open(Path(self.plan["snapshot_dir"]) / path.lstrip("/"), "rb") as f:
-                data = f.read(expected + 1)
-        except OSError:
-            raise _SnapshotDamaged from None
-        if len(data) != expected or hashlib.sha256(data).hexdigest() != self.plan["manifest"][path]:
+        if (data := snapshot_file(self.plan, path)) is None:
             raise _SnapshotDamaged
         return data
+
+
+def snapshot_file(plan: dict, path: str) -> bytes | None:
+    """스냅샷의 `path` 바이트. 없거나 manifest 와 다르면(손상) None.
+
+    읽기는 기대 크기 + 1 바이트까지만 합니다. 손상으로 커진 파일을 통째로 메모리에 올리지 않습니다.
+    """
+    expected = plan["sizes"][path]
+    try:
+        with open(Path(plan["snapshot_dir"]) / path.lstrip("/"), "rb") as f:
+            data = f.read(expected + 1)
+    except OSError:
+        return None
+    if len(data) != expected or hashlib.sha256(data).hexdigest() != plan["manifest"][path]:
+        return None
+    return data
 
 
 def transfer_job(app: Flask, job_id: int, *, parallel: bool = False) -> None:
@@ -329,11 +336,12 @@ def _logged(app: Flask, worker: _Worker) -> None:
 
 
 def _compare(ftp, path: str, sha256: str, seconds: float, max_bytes: int) -> str | None:
-    """대상 file 을 받아 manifest 와 같으면 verified, 다르거나 없으면 pending, 알 수 없으면 None."""
+    """대상 file 을 받아 manifest 와 같으면 verified, 다르거나 없으면 pending, 알 수 없으면 None.
+
+    크기 초과(`TransferTooLarge`, 다름)는 FtpClient 가 연결을 버린 뒤라 호출자가 받아 처리합니다.
+    """
     try:
         data = ftp.download(path, max_bytes=max_bytes, deadline=seconds)
-    except TransferTooLarge:
-        return "pending"
     except error_perm as exc:
         if not str(exc).startswith("550"):
             return None
@@ -347,7 +355,7 @@ def reconcile(app: Flask, files: list[dict]) -> None:
     """재기동 대조(스펙 "재기동 대조 복구"). `files` 는 `store.files_to_reconcile` 의 `uncertain` file.
 
     대상마다 연결 하나로 차례로 받아 봅니다. 읽지 못한 file 은 `uncertain` 그대로이고, 대상의 임시 파일은
-    출처를 모르므로 지우지 않습니다.
+    출처를 모르므로 지우지 않습니다. 한 file 에서 연결이 버려지거나 끊기면 다음 file 은 새 연결로 봅니다.
     ponytail: 대상을 하나씩 돕니다. 기동이 너무 느려지면 대상마다 스레드로.
     """
     if not files:
@@ -361,15 +369,24 @@ def reconcile(app: Flask, files: list[dict]) -> None:
     for eqp, group in groupby(files, key=lambda f: f["eqp"]):
         if eqp not in tools:
             continue
-        try:
-            with app.config["CONNECT"](tools[eqp]) as ftp:
-                for f in group:
-                    try:
-                        to = _compare(ftp, f["path"], f["sha256"], seconds, max_bytes)
-                    except Exception:
-                        app.logger.warning("reconcile %s %s failed", eqp, f["path"], exc_info=True)
-                        continue
-                    if to is not None:
-                        store.move_file(db, f["job_id"], eqp, f["path"], "uncertain", to)
-        except Exception:
-            app.logger.warning("reconcile: %s unreachable", eqp, exc_info=True)
+        todo = list(group)
+        while todo:
+            entered = False
+            try:
+                with app.config["CONNECT"](tools[eqp]) as ftp:
+                    entered = True
+                    while todo:
+                        f = todo.pop(0)
+                        try:
+                            to = _compare(ftp, f["path"], f["sha256"], seconds, max_bytes)
+                        except TransferTooLarge:
+                            store.move_file(db, f["job_id"], eqp, f["path"], "uncertain", "pending")
+                            break  # 연결이 버려졌습니다. 다음 file 은 새 연결로.
+                        if to is not None:
+                            store.move_file(db, f["job_id"], eqp, f["path"], "uncertain", to)
+            except Exception:
+                if not entered:
+                    app.logger.warning("reconcile: %s unreachable", eqp, exc_info=True)
+                    break
+                # 이 file 은 uncertain 그대로. 연결 상태를 모르니 다음 file 은 새 연결로.
+                app.logger.warning("reconcile %s %s failed", eqp, f["path"], exc_info=True)

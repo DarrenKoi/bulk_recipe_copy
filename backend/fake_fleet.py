@@ -116,6 +116,7 @@ class FakeTool:
         if remote_path in self.corrupt_downloads:
             data = bytes(b ^ 0xFF for b in data)
         if max_bytes is not None and len(data) > max_bytes:
+            self._discarded = True  # FtpClient 도 크기 초과 뒤 연결을 버립니다
             raise TransferTooLarge(f"{remote_path} exceeds {max_bytes} bytes")
         return data
 
