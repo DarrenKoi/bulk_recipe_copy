@@ -1,3 +1,4 @@
+import threading
 from ftplib import error_perm
 
 from test_transfer import A_TIF, P1_IDP, P1_RAW_DIR, T, counts, fleet, make, start  # noqa: F401
@@ -164,3 +165,71 @@ def test_a_raw_listing_over_the_scan_cap_is_unknown_and_the_copy_goes_on(make, m
     job = c.get(f"/api/jobs/{job_id}").json
     assert job["file_counts"] == counts(verified=10)
     assert [r["target_only"] for r in target(job, "6MCDE305")["recipes"]] == [None, 0]
+
+
+def test_the_job_is_not_finished_until_the_last_target_only_count_is_attempted(make, fleet):
+    tool = fleet["6MCDE305"]
+    real, entered, release = tool.list_details, threading.Event(), threading.Event()
+
+    def held_raw(remote_dir, *args, **kwargs):
+        if remote_dir == P2_RAW_DIR:  # 마지막 레시피의 대상 전용 집계
+            entered.set()
+            assert release.wait(5)
+        return real(remote_dir, *args, **kwargs)
+
+    tool.list_details = held_raw
+    app, c = make()
+    job_id = start(c, targets=["6MCDE305"])
+    worker = threading.Thread(target=run_until_idle, args=(app,))
+    worker.start()
+    try:
+        assert entered.wait(5)
+        job = c.get(f"/api/jobs/{job_id}").json
+        assert (job["progress"]["finished"], recipe(job, "6MCDE305", "P2")["target_only"]) == (False, None)
+    finally:
+        release.set()
+        worker.join(5)
+
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert (job["progress"]["finished"], recipe(job, "6MCDE305", "P2")["target_only"]) == (True, 0)
+
+
+def test_a_dropped_connection_on_the_target_only_listing_does_not_fail_later_recipes(make, fleet):
+    tool = fleet["6MCDE305"]
+    real = tool.list_details
+
+    def reset_raw(remote_dir, *args, **kwargs):
+        if remote_dir == P1_RAW_DIR:
+            raise ConnectionResetError("[Errno 54] Connection reset by peer")
+        return real(remote_dir, *args, **kwargs)
+
+    tool.list_details = reset_raw
+    app, c = make(transfer_retries=0)
+    job_id = start(c, targets=["6MCDE305"])
+    run_until_idle(app)
+
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert job["file_counts"] == counts(verified=5)
+    assert [r["target_only"] for r in target(job, "6MCDE305")["recipes"]] == [None, 0]
+
+
+def test_the_target_only_scan_shares_one_entry_budget_across_empty_sub_folders(make, fleet, monkeypatch):
+    # P1 raw 는 a.tif, sub/, sub/b.csv 로 3 항목. P2 raw 는 c.tif 와 e1/ 아래 빈 폴더 체인으로 5 항목,
+    # LIST 하나에 2 항목을 넘지 않으니 LIST 마다 상한을 새로 주면 통과해 버립니다.
+    monkeypatch.setattr(transfer, "_TARGET_ONLY_SCAN_CAP", 4)
+    tool = fleet["6MCDE305"]
+
+    def empty_chain(path):
+        if path.startswith(P2_RAW_DIR + "/"):
+            tool.dirs.update({f"{P2_RAW_DIR}/e1", f"{P2_RAW_DIR}/e1/e2", f"{P2_RAW_DIR}/e1/e2/e3",
+                              f"{P2_RAW_DIR}/e1/e2/e3/e4"})
+
+    tool.on_download = empty_chain
+    app, c = make()
+    job_id = start(c)
+    run_until_idle(app)
+
+    job = c.get(f"/api/jobs/{job_id}").json
+    assert job["file_counts"] == counts(verified=10)
+    assert [r["target_only"] for r in target(job, "6MCDE305")["recipes"]] == [0, None]
+    assert [r["target_only"] for r in target(job, "4CCD6701")["recipes"]] == [0, 0]

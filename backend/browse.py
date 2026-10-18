@@ -18,7 +18,7 @@ class HitachiFtpClient(FtpClient):
         raise NotImplementedError("레시피 목록 명령 미확정, 티켓 13")
 
 
-class _Bounded:
+class Bounded:
     """탐색 요청 하나의 LIST들이 시간·항목 예산 하나를 나눠 씁니다.
 
     LIST마다 따로 상한을 두면 큰 하위 트리나 조금씩 응답하는 장비가 요청 스레드를 계속 잡습니다.
@@ -47,20 +47,24 @@ class _Bounded:
         return self._spend(self._ftp.list_idp_files(data_dir, **self._limits()))
 
 
-def walk_files(ftp, remote_dir: str, **limits):
+def walk_files(ftp, remote_dir: str):
     """`remote_dir` 아래 파일 전부(하위 폴더 포함). 링크는 따라가지 않고 건너뜁니다.
 
     목록은 장비가 준 데이터라 항목마다 요청한 폴더의 직계 자식인지 확인합니다(`../x` 같은 이름 거부).
+    재귀 대신 스택이라 깊은 폴더 체인도 RecursionError 없이 `Bounded` 예산에서 멈춥니다.
     """
-    for e in ftp.list_details(remote_dir, **limits):
-        if e.path != layout.child(remote_dir, e.name):
-            raise ValueError(f"{remote_dir} 의 직계 자식이 아닌 목록 항목입니다: {e.path!r}")
-        if e.is_link:
-            continue
-        if e.is_dir:
-            yield from walk_files(ftp, e.path, **limits)
-        else:
-            yield e
+    stack = [remote_dir]
+    while stack:
+        d = stack.pop()
+        for e in ftp.list_details(d):
+            if e.path != layout.child(d, e.name):
+                raise ValueError(f"{d} 의 직계 자식이 아닌 목록 항목입니다: {e.path!r}")
+            if e.is_link:
+                continue
+            if e.is_dir:
+                stack.append(e.path)
+            else:
+                yield e
 
 
 def _raw_summary(ftp, remote_dir: str) -> tuple[int, int]:
@@ -80,7 +84,7 @@ def register_browse(app: Flask) -> None:
             return error_json("unknown_tool", f"명부에 없는 Hitachi 장비입니다: {eqp}", 404)
         try:
             with app.config["CONNECT"](tools[eqp]) as ftp:
-                return op(_Bounded(ftp, app.config["BROWSE_SECONDS"], app.config["BROWSE_MAX_ENTRIES"]))
+                return op(Bounded(ftp, app.config["BROWSE_SECONDS"], app.config["BROWSE_MAX_ENTRIES"]))
         except ValueError as exc:
             return error_json("bad_path", str(exc), 400)
         except NotImplementedError as exc:
