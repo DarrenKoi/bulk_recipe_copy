@@ -81,8 +81,19 @@ def _block(db, job_id: int, reason: str) -> None:
             time.sleep(1)
 
 
+# ponytail: 수집은 한 번에 하나만 돕니다. 잔여 총량 계산·수집·정리를 한 lock 으로 묶어 동시 수집이
+# 같은 잔여량을 두 번 쓰지 않게 합니다. 대상 전송은 여전히 병렬입니다. 수집이 병목이 되면 job 마다
+# 바이트를 예약하는 방식으로 바꿉니다.
+_collect_lock = threading.Lock()
+
+
 def collect(app: Flask, job: dict) -> None:
     """원본을 연결 하나로 job 스냅샷 폴더에 받고 manifest 를 확정합니다. 실패하면 차단."""
+    with _collect_lock:
+        _collect(app, job)
+
+
+def _collect(app: Flask, job: dict) -> None:
     db, root = app.config["DB_PATH"], app.config["SNAPSHOT_DIR"]
     snap = root / str(job["id"])
     shutil.rmtree(snap, ignore_errors=True)
@@ -160,9 +171,32 @@ class Scheduler:
                 store.block_collection(db, job_id, "waiting", f"상한 초과: 대상 {waiting[job_id].n}대 > 스레드 상한 {cap}")
             claimed = []
             for job_id in start:
-                claimed.append(store.claim_job(db, job_id))
+                try:
+                    claimed.append(store.claim_job(db, job_id))
+                except Exception:  # 트랜잭션이 되돌려져 이 job 과 뒤 job 은 대기로 남고 다음 판정에서 다시 봅니다.
+                    self.app.logger.exception("claim of job %s failed", job_id)
+                    break
                 self.running[job_id] = waiting[job_id]._replace(started=True)
             return claimed
+
+    def spawn(self) -> None:
+        """운영: 시작 판정한 job 마다 스레드를 띄웁니다. 못 띄운 job 은 사유와 함께 차단하고 예약을 풉니다."""
+        for job in self.admit():
+            try:
+                threading.Thread(target=self._run_logged, args=(job,), name=f"brc-job-{job['id']}", daemon=True).start()
+            except Exception:
+                self.app.logger.exception("job %s: thread start failed", job["id"])
+                try:
+                    _block(self.app.config["DB_PATH"], job["id"], "작업자 시작 실패")
+                finally:
+                    with self.lock:
+                        del self.running[job["id"]]
+
+    def _run_logged(self, job: dict) -> None:
+        try:
+            self.run(job, parallel=True)
+        except Exception:
+            self.app.logger.exception("job %s failed", job["id"])
 
     def run(self, job: dict, *, parallel: bool) -> None:
         """수집(슬롯 하나) 뒤 대상 작업자들. 마지막 작업자가 끝나면 예약을 풉니다."""
@@ -189,17 +223,10 @@ def start_scheduler(app: Flask) -> None:
     sched, wake = app.config["SCHEDULER"], threading.Event()
     app.config["SCHEDULER_WAKE"] = wake
 
-    def run(job):
-        try:
-            sched.run(job, parallel=True)
-        except Exception:
-            app.logger.exception("job %s failed", job["id"])
-
     def loop():
         while True:
             try:
-                for job in sched.admit():
-                    threading.Thread(target=run, args=(job,), name=f"brc-job-{job['id']}", daemon=True).start()
+                sched.spawn()
             except Exception:
                 app.logger.exception("scheduler pass failed")
             wake.wait(5)

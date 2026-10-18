@@ -200,11 +200,21 @@ def transfer_job(app: Flask, job_id: int, *, parallel: bool = False) -> None:
         for w in workers:
             w.run()
         return
-    threads = [threading.Thread(target=_logged, args=(app, w), name=f"brc-{job_id}-{w.eqp}") for w in workers]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    # 시작한 작업자는 예외 경로에서도 모두 기다립니다. 먼저 돌아가면 스케줄러가 살아 있는 작업자의
+    # 장비·슬롯 예약을 풀어 버립니다.
+    started = []
+    try:
+        for w in workers:
+            t = threading.Thread(target=_logged, args=(app, w), name=f"brc-{job_id}-{w.eqp}")
+            t.start()
+            started.append(t)
+    except Exception:
+        app.logger.exception("job %s: worker start failed", job_id)
+        for w in workers[len(started):]:
+            store.fail_pending(app.config["DB_PATH"], job_id, "작업자 시작 실패", eqp=w.eqp)
+    finally:
+        for t in started:
+            t.join()
 
 
 def _logged(app: Flask, worker: _Worker) -> None:

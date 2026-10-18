@@ -1,10 +1,11 @@
+import threading
 from datetime import datetime
 
 import pytest
 
-from backend import create_app, layout
+from backend import create_app, layout, store
 from backend.fake_fleet import KST, FakeTool
-from backend.jobs import run_until_idle
+from backend.jobs import run_until_idle, snapshot_bytes
 from backend.roster import Tool
 from backend.scheduler import Entry, admit
 
@@ -143,3 +144,94 @@ def test_finished_jobs_hold_no_tools_even_with_uncertain_files(make, fleet):
 
     second = post(c, "S1", "T1")
     assert [j["id"] for j in app.config["SCHEDULER"].admit()] == [second]
+
+
+def fail_start_of(monkeypatch, name: str) -> None:
+    """이름이 `name` 인 스레드만 시작에 실패하게 합니다(스레드를 더 못 만드는 상황 흉내)."""
+    real = threading.Thread.start
+
+    def start(self):
+        if self.name == name:
+            raise RuntimeError("can't start new thread")
+        real(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+
+
+def test_a_failed_target_start_keeps_the_job_holding_its_tools_until_started_workers_end(make, fleet, monkeypatch):
+    app, c = make()
+    sched = app.config["SCHEDULER"]
+    first = post(c, "S1", "T1", "T2")
+    fail_start_of(monkeypatch, f"brc-{first}-T2")
+    in_t1, release = threading.Event(), threading.Event()
+    fleet["T1"].on_download = lambda path: (in_t1.set(), release.wait(5))
+
+    [job] = sched.admit()
+    runner = threading.Thread(target=sched.run, args=(job,), kwargs={"parallel": True})
+    runner.start()
+    assert in_t1.wait(5)
+    later = post(c, "S2", "T1")
+    assert sched.admit() == []  # T1 작업자가 아직 살아 있습니다.
+
+    release.set()
+    runner.join(5)
+    files = c.get(f"/api/jobs/{first}").json
+    assert (files["file_counts"]["verified"], files["file_counts"]["failed"]) == (2, 2)
+    assert [j["id"] for j in sched.admit()] == [later]
+
+
+def test_concurrent_collections_share_one_snapshot_cap(make, fleet):
+    # 스냅샷 하나는 9 B(`IDP P1\n` 7 B + `a.tif` 2 B). 상한 10 B 에는 하나만 듭니다.
+    app, c = make(snapshot_cap_bytes=10)
+    first, second = post(c, "S1", "T1"), post(c, "S2", "T2")
+    both = threading.Barrier(2)
+
+    def sync(path):  # 두 수집이 같이 돈다면 첫 다운로드 전에 서로 만납니다.
+        try:
+            both.wait(timeout=1)
+        except threading.BrokenBarrierError:
+            pass
+
+    fleet["S1"].on_download = fleet["S2"].on_download = sync
+    claimed = app.config["SCHEDULER"].admit()
+    assert [j["id"] for j in claimed] == [first, second]
+    runners = [threading.Thread(target=app.config["SCHEDULER"].run, args=(j,), kwargs={"parallel": False})
+               for j in claimed]
+    for t in runners:
+        t.start()
+    for t in runners:
+        t.join(10)
+
+    assert snapshot_bytes(app.config["SNAPSHOT_DIR"]) == 9
+    states = sorted(c.get(f"/api/jobs/{j}").json["collection"]["state"] for j in (first, second))
+    assert states == ["blocked", "done"]
+
+
+def test_a_failed_claim_leaves_earlier_claims_running_and_later_jobs_waiting(make, monkeypatch):
+    app, c = make()
+    first, second = post(c, "S1", "T1"), post(c, "S2", "T2")
+    real = store.claim_job
+
+    def claim(db, job_id):
+        if job_id == second:
+            raise RuntimeError("database is locked")
+        return real(db, job_id)
+
+    monkeypatch.setattr(store, "claim_job", claim)
+    claimed = app.config["SCHEDULER"].admit()
+    assert [j["id"] for j in claimed] == [first]
+    assert board(c) == {first: ("collecting", None), second: ("waiting", 1)}
+
+    monkeypatch.setattr(store, "claim_job", real)
+    finish(app, claimed)
+    assert [j["id"] for j in app.config["SCHEDULER"].admit()] == [second]
+
+
+def test_a_job_whose_thread_cannot_start_is_blocked_and_frees_its_tools(make, monkeypatch):
+    app, c = make()
+    first, later = post(c, "S1", "T1"), post(c, "S1", "T2")
+    fail_start_of(monkeypatch, f"brc-job-{first}")
+
+    app.config["SCHEDULER"].spawn()
+    assert c.get(f"/api/jobs/{first}").json["collection"] == {"state": "blocked", "reason": "작업자 시작 실패"}
+    assert [j["id"] for j in app.config["SCHEDULER"].admit()] == [later]
