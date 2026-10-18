@@ -188,6 +188,10 @@ class Scheduler:
                 self.app.logger.exception("job %s: thread start failed", job["id"])
                 try:
                     _block(self.app.config["DB_PATH"], job["id"], "작업자 시작 실패")
+                except Exception:
+                    # 차단 기록마저 실패하면 job 은 '수집 중'으로 남고 재기동 대조(티켓 12)가 거둡니다.
+                    # 뒤 job 들의 인계는 계속합니다.
+                    self.app.logger.exception("job %s: could not record the start failure", job["id"])
                 finally:
                     with self.lock:
                         del self.running[job["id"]]

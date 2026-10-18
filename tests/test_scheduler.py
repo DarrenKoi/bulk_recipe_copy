@@ -235,3 +235,24 @@ def test_a_job_whose_thread_cannot_start_is_blocked_and_frees_its_tools(make, mo
     app.config["SCHEDULER"].spawn()
     assert c.get(f"/api/jobs/{first}").json["collection"] == {"state": "blocked", "reason": "작업자 시작 실패"}
     assert [j["id"] for j in app.config["SCHEDULER"].admit()] == [later]
+
+
+def test_a_failed_block_record_does_not_stop_later_jobs_from_starting(make, monkeypatch):
+    import sqlite3
+
+    import backend.jobs as jobs
+
+    app, c = make()
+    first, second = post(c, "S1", "T1"), post(c, "S2", "T2")
+    fail_start_of(monkeypatch, f"brc-job-{first}")
+
+    def locked(*_):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(jobs, "_block", locked)
+    app.config["SCHEDULER"].spawn()
+    for t in threading.enumerate():
+        if t.name == f"brc-job-{second}":
+            t.join(timeout=10)
+    assert c.get(f"/api/jobs/{second}").json["collection"]["state"] == "done"
+    assert first not in app.config["SCHEDULER"].running
