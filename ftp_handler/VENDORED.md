@@ -14,3 +14,4 @@ STOR). 지우지 않고 두는 것은 upstream과의 diff를 읽기 쉽게 하�
 2026-10-18 비교 시점에 이 사본은 `flask_modules`(`4437371`)와 SKEWNONO(`96b50498`)의
 `ftp_handler/`와 바이트 단위로 같았습니다. 티켓 02에서 `put(overwrite=True)`와 `mkdir`을
 더했고, 두 원본에 반영하는 일은 후속 작업으로 남아 있습니다.
+티켓 06에서 `mkdir(floor=)`(floor 위 폴더는 만들지 않음)를 더 고쳤고, 이것도 upstream과 SKEWNONO 동기화를 기다리는 로컬 변경입니다.
