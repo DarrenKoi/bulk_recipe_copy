@@ -72,6 +72,26 @@ def _raw_summary(ftp, remote_dir: str) -> tuple[int, int]:
     return len(files), sum(f.size or 0 for f in files)
 
 
+def bounded(app: Flask, ftp) -> Bounded:
+    return Bounded(ftp, app.config["BROWSE_SECONDS"], app.config["BROWSE_MAX_ENTRIES"])
+
+
+def read_failure(app: Flask, eqp: str, exc: Exception) -> tuple[str, str, int] | None:
+    """읽기 전용 조회의 예외 -> (code, message, HTTP status). 모르는 예외면 None."""
+    if isinstance(exc, ValueError):
+        return "bad_path", str(exc), 400
+    if isinstance(exc, NotImplementedError):
+        return "not_implemented", str(exc), 501
+    if isinstance(exc, TransferTimeout):
+        return "browse_timeout", f"{eqp}: 탐색이 {app.config['BROWSE_SECONDS']}초 안에 끝나지 않았습니다.", 502
+    if isinstance(exc, ListingTooLarge):
+        return "browse_too_large", f"{eqp}: 탐색할 항목이 {app.config['BROWSE_MAX_ENTRIES']}개를 넘습니다.", 502
+    if isinstance(exc, (OSError, EOFError, ftplib.Error)):
+        # 빈 목록으로 숨기지 않습니다. "레시피 없음"과 "장비에 못 닿음"은 다릅니다.
+        return "tool_unreachable", f"{eqp}: {type(exc).__name__}: {exc}", 502
+    return None
+
+
 def register_browse(app: Flask) -> None:
     from . import error_json
 
@@ -84,20 +104,11 @@ def register_browse(app: Flask) -> None:
             return error_json("unknown_tool", f"명부에 없는 Hitachi 장비입니다: {eqp}", 404)
         try:
             with app.config["CONNECT"](tools[eqp]) as ftp:
-                return op(Bounded(ftp, app.config["BROWSE_SECONDS"], app.config["BROWSE_MAX_ENTRIES"]))
-        except ValueError as exc:
-            return error_json("bad_path", str(exc), 400)
-        except NotImplementedError as exc:
-            return error_json("not_implemented", str(exc), 501)
-        except TransferTimeout:
-            secs = app.config["BROWSE_SECONDS"]
-            return error_json("browse_timeout", f"{eqp}: 탐색이 {secs}초 안에 끝나지 않았습니다.", 502)
-        except ListingTooLarge:
-            n = app.config["BROWSE_MAX_ENTRIES"]
-            return error_json("browse_too_large", f"{eqp}: 탐색할 항목이 {n}개를 넘습니다.", 502)
-        except (OSError, EOFError, ftplib.Error) as exc:
-            # 빈 목록으로 숨기지 않습니다. "레시피 없음"과 "장비에 못 닿음"은 다릅니다.
-            return error_json("tool_unreachable", f"{eqp}: {type(exc).__name__}: {exc}", 502)
+                return op(bounded(app, ftp))
+        except Exception as exc:
+            if (failure := read_failure(app, eqp, exc)) is None:
+                raise
+            return error_json(*failure)
 
     @app.get("/api/tools/<eqp>/classes")
     def classes(eqp):

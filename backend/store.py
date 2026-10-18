@@ -109,16 +109,20 @@ def init(db_path: Path) -> None:
         conn.executescript(_SCHEMA)
 
 
-def create_job(db_path, *, executor, source_eqp, class_name, pairs) -> int:
-    """`pairs` 는 (대상 eqp, idw, idp) 목록입니다."""
+def create_job(db_path, *, executor, source_eqp, class_name, pairs, overwrites=(), create_class=()) -> int:
+    """`pairs`·`overwrites` 는 (대상 eqp, idw, idp) 목록, `create_class` 는 class 폴더를 만들어도 되는 대상입니다."""
     with connect(db_path) as conn, _tx(conn):
         job_id = conn.execute(
             "INSERT INTO jobs (executor, created_at, source_eqp, class_name) VALUES (?, ?, ?, ?)",
             (executor, datetime.now().astimezone().isoformat(timespec="seconds"), source_eqp, class_name),
         ).lastrowid
         conn.executemany(
-            "INSERT INTO job_targets (job_id, eqp) VALUES (?, ?)",
-            [(job_id, e) for e in dict.fromkeys(e for e, _, _ in pairs)],
+            "INSERT INTO job_targets (job_id, eqp, may_create_class) VALUES (?, ?, ?)",
+            [(job_id, e, e in create_class) for e in dict.fromkeys(e for e, _, _ in pairs)],
+        )
+        conn.executemany(
+            "INSERT INTO job_overwrites (job_id, eqp, idw, idp) VALUES (?, ?, ?, ?)",
+            [(job_id, *pair) for pair in overwrites],
         )
         conn.executemany(
             "INSERT INTO job_pairs (job_id, eqp, idw, idp) VALUES (?, ?, ?, ?)",
@@ -208,6 +212,8 @@ def transfer_plan(db_path, job_id: int) -> dict | None:
                 "SELECT eqp, idw, idp FROM job_pairs WHERE job_id = ? ORDER BY eqp, idw, idp", (job_id,))],
             "overwrites": {tuple(r) for r in conn.execute(
                 "SELECT eqp, idw, idp FROM job_overwrites WHERE job_id = ?", (job_id,))},
+            "create_class": {r["eqp"] for r in conn.execute(
+                "SELECT eqp FROM job_targets WHERE job_id = ? AND may_create_class", (job_id,))},
             "pending": pending,
         }
 
@@ -281,6 +287,8 @@ def get_job(db_path, job_id: int) -> dict | None:
                 "SELECT DISTINCT idw, idp FROM job_pairs WHERE job_id = ? ORDER BY idw, idp", (job_id,))],
             "pairs": [{"eqp": r["eqp"], "idw": r["idw"], "idp": r["idp"]} for r in conn.execute(
                 "SELECT eqp, idw, idp FROM job_pairs WHERE job_id = ? ORDER BY eqp, idw, idp", (job_id,))],
+            "overwrite": [{"eqp": r["eqp"], "idw": r["idw"], "idp": r["idp"]} for r in conn.execute(
+                "SELECT eqp, idw, idp FROM job_overwrites WHERE job_id = ? ORDER BY eqp, idw, idp", (job_id,))],
             "tree": _tree(conn, row),
             # 실패·불명확 file 만 평평하게. 트리에도 같은 내용이 있습니다.
             "problems": [dict(r) for r in conn.execute(

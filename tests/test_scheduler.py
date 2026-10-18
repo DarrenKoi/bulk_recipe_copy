@@ -64,9 +64,11 @@ def make(tmp_path, fleet):
 
 
 def post(c, source, *targets) -> int:
+    # 대상에 class 폴더가 없으므로 폴더 생성을 허락한 확인입니다.
     resp = c.post("/api/jobs", json={
         "source_eqp": source, "class_name": "ABC_GATE",
         "recipes": [{"idw": "W1", "idp": "P1"}], "targets": list(targets),
+        "create_class": list(targets),
     })
     assert resp.status_code == 201, resp.json
     return resp.json["id"]

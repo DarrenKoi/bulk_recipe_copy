@@ -251,7 +251,11 @@ def _strings(value, what: str) -> list[str]:
     return value
 
 
-def _parse(body, app: Flask) -> dict:
+def selection(body, app: Flask) -> dict:
+    """사전 점검과 job 생성이 같이 받는 선택(원본, class, 레시피, 대상)을 검사합니다.
+
+    돌려주는 `tools` 는 eqp_id -> 명부의 Tool 입니다.
+    """
     if not isinstance(body, dict):
         raise _Bad("bad_request", "JSON 객체가 필요합니다.")
     source, class_name = body.get("source_eqp"), body.get("class_name")
@@ -279,7 +283,7 @@ def _parse(body, app: Flask) -> dict:
         raise _Bad("bad_path", str(exc)) from None
 
     try:
-        tools = {t.eqp_id for t in hitachi_tools(app.config["ROSTER"]())}
+        tools = {t.eqp_id: t for t in hitachi_tools(app.config["ROSTER"]())}
     except (LookupError, RuntimeError) as exc:
         raise _Bad("roster_unavailable", str(exc), 502) from None
     unknown = [e for e in [source, *targets] if e not in tools]
@@ -291,13 +295,42 @@ def _parse(body, app: Flask) -> dict:
     cap = app.config["MAX_THREADS"]
     if len(targets) > cap:
         raise _Bad("too_many_targets", f"대상 {len(targets)}대가 스레드 상한 {cap}을 넘습니다.")
+    return {"source_eqp": source, "class_name": class_name, "recipes": recipes, "targets": targets, "tools": tools}
+
+
+def _triples(value, what: str) -> list[tuple[str, str, str]]:
+    if not isinstance(value, list) or not all(isinstance(v, dict) for v in value):
+        raise _Bad("bad_request", f"{what}는 {{eqp, idw, idp}} 목록이어야 합니다.")
+    out = [(v.get("eqp"), v.get("idw"), v.get("idp")) for v in value]
+    if not all(isinstance(x, str) for t in out for x in t):
+        raise _Bad("bad_request", f"{what}의 eqp, idw, idp 는 문자열이어야 합니다.")
+    return list(dict.fromkeys(out))
+
+
+def _parse(body, app: Flask) -> dict:
+    sel = selection(body, app)
+    # 확인 팝업의 선택을 그대로 기록합니다. 사전 점검은 다시 돌리지 않습니다(스펙 "사전 점검과 확인").
+    every = [(eqp, idw, idp) for eqp in sel["targets"] for idw, idp in sel["recipes"]]
+    pairs = every if body.get("pairs") is None else _triples(body["pairs"], "pairs")
+    if outside := set(pairs) - set(every):
+        raise _Bad("pair_outside_selection", f"대상 × 레시피 밖의 쌍입니다: {'/'.join(min(outside))}")
+    if not pairs:
+        raise _Bad("no_pairs", "남은 (대상, 레시피) 쌍이 없어 job 을 만들지 않습니다.")
+    overwrite = _triples(body.get("overwrite", []), "overwrite")
+    if outside := set(overwrite) - set(pairs):
+        raise _Bad("overwrite_outside_selection", f"job 에 없는 쌍의 덮어쓰기 허락입니다: {'/'.join(min(outside))}")
+    create_class = list(dict.fromkeys(_strings(body.get("create_class", []), "create_class")))
+    if outside := set(create_class) - {eqp for eqp, _, _ in pairs}:
+        raise _Bad("create_class_outside_selection", f"job 에 없는 대상의 폴더 허락입니다: {', '.join(sorted(outside))}")
+
     # 새 job 의 크기는 수집 전이라 모릅니다. 수집 중에도 남은 총량으로 다시 막습니다(collect).
     used, limit = snapshot_bytes(app.config["SNAPSHOT_DIR"]), app.config["SNAPSHOT_CAP_BYTES"]
     if used >= limit:
         raise _Bad("snapshot_full", f"스냅샷 총량 {used} B가 상한 {limit} B에 닿아 새 job 을 만들 수 없습니다.", 507)
-    # 티켓 04 의 요청은 대상 × 레시피 전부입니다. 쌍을 빼는 확인 단계는 티켓 06.
-    pairs = [(eqp, idw, idp) for eqp in targets for idw, idp in recipes]
-    return {"source_eqp": source, "class_name": class_name, "pairs": pairs}
+    return {
+        "source_eqp": sel["source_eqp"], "class_name": sel["class_name"], "pairs": pairs,
+        "overwrites": overwrite, "create_class": create_class,
+    }
 
 
 def register_jobs(app: Flask) -> None:

@@ -26,6 +26,7 @@ _CONNECTION_ERRORS = (OSError, EOFError, TransferTimeout, FtpError)
 _APPEARED = "확인 뒤 대상에 생김"
 # "대상에만 있는 파일" 을 셀 때 스캔 전체가 나눠 쓰는 항목(폴더 포함) 상한. 넘으면 세지 않습니다(모름).
 _TARGET_ONLY_SCAN_CAP = 10_000
+_NO_CLASS = "대상에 class 폴더 없음"
 
 
 class _Discarded(Exception):
@@ -68,6 +69,8 @@ class _Worker:
         self.seconds, self.max_bytes = app.config["TRANSFER_SECONDS"], app.config["TRANSFER_MAX_BYTES"]
         self.checked: set[tuple[str, str]] = set()  # 첫 쓰기 전 재확인을 마친 (idw, idp)
         self.made: set[str] = set()  # 이미 mkdir 한 폴더
+        # class 폴더(`{class}/data/`)는 허락받은 대상만 만듭니다. 아니면 첫 쓰기 전에 있는지 봅니다.
+        self.class_ok = eqp in plan["create_class"]
         # 이 작업자가 in_progress 로 잡은 파일과, 그 파일의 put 이 끝났는지. 재연결 뒤 같은 파일을
         # 이어 갈 때 다시 잡거나 다시 올리지 않으려고 둡니다(다시 올리면 자기 파일에 TargetExists).
         self.claimed: str | None = None
@@ -143,6 +146,13 @@ class _Worker:
                 return
             if data is None:
                 return self._end(path, "failed", "전송 크기 상한 초과")
+            if not self.class_ok:
+                # mkdir 은 상위 폴더까지 만들므로 허락 없는 대상에서 class 폴더가 생기지 않게 먼저 막습니다.
+                if _names(ftp, layout.data_dir(self.plan["class_name"]), self.seconds) is None:
+                    self._end(path, "failed", _NO_CLASS)
+                    store.fail_pending(self.db, self.job_id, _NO_CLASS, eqp=self.eqp)
+                    return
+                self.class_ok = True
             overwrite = (self.eqp, *recipe) in self.plan["overwrites"]
             if not overwrite and recipe not in self.checked:
                 if _recipe_present(ftp, self.plan["class_name"], *recipe, self.seconds):

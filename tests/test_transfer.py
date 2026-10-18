@@ -58,13 +58,15 @@ def make(tmp_path, fleet):
     return make
 
 
-def start(c, targets=("6MCDE305", "4CCD6701")) -> int:
+def start(c, targets=("6MCDE305", "4CCD6701"), **choices) -> int:
+    # 대상에 class 폴더가 없으므로 기본은 폴더 생성을 허락한 확인입니다.
     resp = c.post("/api/jobs", json={
         "source_eqp": "6MCDE301",
         "class_name": "ABC_GATE",
         "recipes": [{"idw": "W1", "idp": "P1"}, {"idw": "W1", "idp": "P2"}],
         "targets": list(targets),
-    })
+        "create_class": list(targets),
+    } | choices)
     assert resp.status_code == 201
     return resp.json["id"]
 

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { Choice, Preflight } from './ConfirmDialog.vue'
+
 type Tool = { eqp_id: string, fab_name: string, model: string }
 
 const props = defineProps<{ eqp: string, cls: string, picked: string[] }>()
@@ -17,26 +19,39 @@ const shown = computed(() => {
   return (data.value?.tools ?? []).filter(t => t.eqp_id !== props.eqp && t.eqp_id.toUpperCase().includes(q))
 })
 
+const recipes = computed(() => props.picked.map((rid) => {
+  const [idw, idp] = rid.split('/')
+  return { idw: idw!, idp: idp! }
+}))
+const selection = () => ({ source_eqp: props.eqp, class_name: props.cls, recipes: recipes.value, targets: targets.value })
+const check = ref<Preflight | null>(null)
+const confirming = ref(false)
+const reason = (e: any) => e?.data?.error?.message ?? e?.message
+
+// 실행은 사전 점검 → 확인 팝업 → job 생성입니다. 팝업의 선택을 그대로 보냅니다.
 async function run() {
   sending.value = true
   failure.value = null
   try {
-    const job = await $fetch<{ id: number }>('/api/jobs', {
-      method: 'POST',
-      body: {
-        source_eqp: props.eqp,
-        class_name: props.cls,
-        recipes: props.picked.map((rid) => {
-          const [idw, idp] = rid.split('/')
-          return { idw, idp }
-        }),
-        targets: targets.value
-      }
-    })
+    check.value = await $fetch<Preflight>('/api/preflight', { method: 'POST', body: selection() })
+    confirming.value = true
+  } catch (e) {
+    failure.value = `사전 점검을 하지 못했습니다. ${reason(e)}`
+  } finally {
+    sending.value = false
+  }
+}
+
+async function create(choice: Choice) {
+  sending.value = true
+  try {
+    const job = await $fetch<{ id: number }>('/api/jobs', { method: 'POST', body: { ...selection(), ...choice } })
+    confirming.value = false
     targets.value = []
     emit('created', job.id)
-  } catch (e: any) {
-    failure.value = e?.data?.error?.message ?? e?.message
+  } catch (e) {
+    confirming.value = false
+    failure.value = `job을 만들지 못했습니다. ${reason(e)}`
   } finally {
     sending.value = false
   }
@@ -115,7 +130,17 @@ async function run() {
       <span
         v-if="failure"
         class="sk-body text-(--sk-bad)"
-      >job을 만들지 못했습니다. {{ failure }}</span>
+      >{{ failure }}</span>
     </div>
+    <ConfirmDialog
+      v-if="check && confirming"
+      v-model:open="confirming"
+      :eqp="eqp"
+      :cls="cls"
+      :recipes="recipes"
+      :check="check"
+      :sending="sending"
+      @confirm="create"
+    />
   </section>
 </template>

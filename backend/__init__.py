@@ -8,6 +8,7 @@ from flask import Flask, g, jsonify, request
 from . import store
 from .browse import register_browse
 from .jobs import register_jobs, start_scheduler
+from .preflight import register_preflight
 from .roster import Tool, hitachi_tools
 from .spa import register_spa
 
@@ -105,6 +106,7 @@ def create_app(
 
     register_browse(app)
     register_jobs(app)
+    register_preflight(app)
     if scheduler:
         start_scheduler(app)
     register_spa(app, Path(spa_dir))
