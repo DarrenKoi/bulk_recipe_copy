@@ -1,6 +1,8 @@
-"""uWSGI 진입점(`application`)과 집 개발 실행(`python index.py`).
+"""uWSGI 진입점(`application`)과 localhost 실행(`python index.py`).
 
-`BRC_DEV=1` 이면 가짜 명부·샘플 레시피를 채운 가짜 장비와 개발용 신원(`local-dev`, 허용됨)으로 뜹니다.
+`python index.py` 는 localhost 실행(집·사무실 공통)이라 LASTUSER 쿠키가 없으면 개발용 신원(`local-dev`,
+허용됨)으로 들어갑니다. uWSGI 는 이 모듈을 `index` 로 import 하므로 쿠키 신원만 씁니다.
+`BRC_DEV=1` 이면 office 명부·장비 대신 가짜 명부와 샘플 레시피를 채운 가짜 장비로 뜹니다(집).
 """
 
 import os
@@ -17,6 +19,7 @@ ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 
 DEV = os.environ.get("BRC_DEV") == "1"
+LOCAL = __name__ == "__main__"
 DEV_USER = "local-dev"
 VAR = Path(os.environ.get("BRC_VAR_DIR", ROOT / "var"))
 allowed = {u.strip() for u in os.environ.get("BRC_ALLOWED_USERS", "").split(",") if u.strip()}
@@ -38,8 +41,8 @@ application = create_app(
     connect=(lambda tool: FLEET[tool.eqp_id]) if DEV else connect,
     db_path=VAR / "brc.sqlite3",
     snapshot_dir=VAR / "snapshots",
-    allowed_users=allowed | {DEV_USER} if DEV else allowed,
-    dev_user=DEV_USER if DEV else None,
+    allowed_users=allowed | {DEV_USER} if LOCAL else allowed,
+    dev_user=DEV_USER if LOCAL else None,
     browse_seconds=float(os.environ.get("BRC_BROWSE_SECONDS", 5)),
     browse_max_entries=int(os.environ.get("BRC_BROWSE_MAX_ENTRIES", 5000)),
     max_threads=int(os.environ.get("BRC_MAX_THREADS", 32)),
@@ -50,4 +53,4 @@ application = create_app(
 )
 
 if __name__ == "__main__":
-    application.run(host="127.0.0.1", port=int(os.environ.get("PORT", 5050)), debug=DEV)
+    application.run(host="127.0.0.1", port=int(os.environ.get("PORT", 5060)), debug=DEV)

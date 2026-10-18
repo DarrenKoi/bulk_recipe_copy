@@ -1,5 +1,6 @@
 // Copied from skewnono_v3_nuxt frontend/nuxt.config.ts, trimmed.
-const apiTarget = import.meta.env.NUXT_API_TARGET || 'http://localhost:5050'
+const apiTarget = import.meta.env.NUXT_API_TARGET || 'http://localhost:5060'
+const portFromEnv = Number.parseInt(import.meta.env.NUXT_PORT || '', 10)
 
 export default defineNuxtConfig({
   modules: ['@nuxt/ui'],
@@ -18,6 +19,11 @@ export default defineNuxtConfig({
 
   // Fonts are self-hosted under public/fonts; never contact a font CDN.
   ui: { fonts: false },
+
+  // SKEWNONO uses 3000 (and Flask 5050); keep both apps runnable side by side.
+  devServer: {
+    port: Number.isFinite(portFromEnv) ? portFromEnv : 3060
+  },
 
   compatibilityDate: '2025-01-15',
 
