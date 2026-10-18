@@ -48,24 +48,15 @@ const { data: detail, error: detailError, refresh: refreshDetail } = await useAs
   { watch: [opened] }
 )
 
-// 끝난 job(수집 차단 또는 모든 file 종료)은 갱신하지 않습니다.
-const finished = (j: Job) => j.progress.finished
-
+// 열린 상세는 끝난 뒤에도 갱신합니다. 재기동 대조가 끝난 job 의 결과(상태·임시 경로)도 바꾸기 때문입니다.
 let timer: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
   timer = setInterval(() => {
     refreshList()
-    if (detail.value && !finished(detail.value)) refreshDetail()
+    if (opened.value !== null) refreshDetail()
   }, POLL_MS)
 })
 onUnmounted(() => clearInterval(timer))
-
-// 재기동 대조는 끝난 것으로 본 job 의 결과도 바꿉니다(verified·pending 으로). 열린 job 의 목록 항목이
-// 바뀌면 타이머가 멈춘 상세도 다시 읽습니다. 다른 job 을 연 것은 useAsyncData 의 watch 가 읽습니다.
-const listed = computed(() => JSON.stringify(list.value?.jobs.find(j => j.id === opened.value) ?? null))
-watch([opened, listed], ([id, now], [prevId, before]) => {
-  if (id === prevId && now !== before && detail.value && finished(detail.value)) refreshDetail()
-})
 
 // 재시도할 쌍: 수집이 막힌 job 은 남은 쌍 전부, 아니면 실패·불명확으로 끝난 장비에서 검증되지 않은 파일이 있는 레시피.
 // 취소로 남은 파일은 failed("취소")라 여기에 같이 실립니다.
