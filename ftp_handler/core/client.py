@@ -2,9 +2,10 @@
 
 The fleet downloader (``direct_downloader/fleet_downloader.py``) is built for
 fanning out across hundreds of hosts concurrently. This is its small sibling:
-one host, one blocking connection, the four operations you reach for from a
+one host, one blocking connection, the operations you reach for from a
 notebook or an ad-hoc script — list a directory, download a file, upload a
-file, remove a file — plus ``put``, a no-clobber write via temp file + rename.
+file, remove a file, make or remove a directory — plus ``put``, a no-clobber
+write via temp file + rename.
 
 Use it as a context manager so the connection is opened once and always closed::
 
@@ -15,6 +16,8 @@ Use it as a context manager so the connection is opened once and always closed::
         data = ftp.download(names[0])                     # fetch one
         ftp.upload("/INBOX/report.csv", csv_bytes)        # push one
         ftp.remove("/MEAS/stale.dat")                     # delete one
+        ftp.mkdir("/INBOX/2026")                          # existing dir is fine
+        ftp.rmdir("/INBOX/old")                           # empty dirs only
 
 Errors from the server (``ftplib.error_perm`` for a missing path, socket
 timeouts for a dead host) propagate to the caller unchanged — there's no fleet
@@ -515,15 +518,34 @@ class FtpClient:
                 if not self._is_dir(level):
                     raise
 
-    def _is_dir(self, remote_path: str) -> bool:
-        cwd = self._ftp.pwd()
-        try:
-            self._ftp.cwd(remote_path)
-        except error_perm:
-            return False
-        self._ftp.cwd(cwd)
-        return True
-
     def remove(self, remote_path: str) -> None:
         """Delete ``remote_path`` (DELE)."""
         self._ftp.delete(remote_path)
+
+    def rmdir(self, remote_dir: str) -> None:
+        """Remove the empty directory ``remote_dir`` (RMD)."""
+        self._ftp.rmd(remote_dir)
+
+    def _is_dir(self, remote_dir: str) -> bool:
+        # CWD in and straight back to PWD. An unparseable PWD reply comes back
+        # as "" and cwd("") is CWD . -- no way back -- so skip the probe then.
+        # Only a clean refusal (error_perm) proves the session did not move.
+        # Anything else from either CWD -- an undecodable reply, a lost one --
+        # may leave it inside remote_dir, where later relative paths would
+        # land: drop the connection instead.
+        here = self._ftp.pwd()
+        if not here:
+            return False
+        try:
+            self._ftp.cwd(remote_dir)
+        except error_perm:
+            return False
+        except BaseException:
+            self._discard()
+            raise
+        try:
+            self._ftp.cwd(here)
+        except BaseException:
+            self._discard()
+            raise
+        return True

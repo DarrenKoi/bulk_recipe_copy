@@ -19,7 +19,7 @@ FTP 서버에 어떻게, 어느 규모로 접근하는지에 맞는 서브패키
 
 ## 케이스 1 — 단일 서버 (`core.FtpClient`)
 
-연결 하나를 재사용하며 컨텍스트 매니저로 쓴다. 즉석 연산 네 가지이며, 서버 오류는
+연결 하나를 재사용하며 컨텍스트 매니저로 쓴다. 서버 오류는
 그대로 전파된다(흡수해 줄 플릿 리포트가 없다).
 
 ```python
@@ -32,7 +32,24 @@ with FtpClient(host="10.0.0.1", user="u", password="p") as ftp:
     data = ftp.download(names[0])                      # RETR -> bytes
     ftp.upload("/INBOX/report.csv", b"a,b\n")          # STOR
     ftp.remove("/MEAS/stale.dat")                      # DELE
+    ftp.mkdir("/INBOX/2026")                           # MKD — 이미 있으면 성공
+    ftp.rmdir("/INBOX/old")                            # RMD — 빈 폴더만
 ```
+
+`mkdir`은 MKD 한 번이라 상위 폴더는 만들지 않는다(`mkdir -p`가 필요하면 플릿
+`mkdir`). 이미 있는 폴더에 대한 550은 그 경로로 `CWD`가 되는지 확인한 뒤에만 성공으로
+치고 원래 위치로 돌아온다. 550이라도 폴더가 아니면(권한 거절 등), 그리고 550이 아닌
+`error_perm`은 그대로 올라온다. 서버의 PWD 응답을 해석할 수 없으면 돌아올 위치를 몰라
+확인하지 않고 550을 그대로 올린다. 확인용 `CWD`가 거절(`error_perm`)이 아닌 이유로
+실패하거나(응답 디코딩 실패, 응답 유실 — 서버는 이미 이동했을 수 있다) 돌아오는 `CWD`가
+실패하면 연결을 버린다 — 다음 상대 경로가 엉뚱한 폴더에서 실행되지 않게 하기 위해서다. `rmdir`은 오류를 그대로 올린다.
+proxy의 `FtpClient`(`from ftp_handler.proxy import FtpClient`)도 `upload`·`put`·`remove`·
+`mkdir`·`rmdir`를 같은 시그니처로 제공한다(2026-10-28부터, 그 전에는 읽기 전용이라
+`WriteNotSupported`를 냈다). 호출마다 proxy가 `/write_sknn_v3`에서 새 연결로
+`core.FtpClient`의 같은 메서드를 실행하므로 동작과 예외(`TargetExists`,
+`TransferUncertain`과 그 `temp_path`, 550의 `error_perm`)가 직접 연결과 같다. 요청이
+proxy에 닿은 뒤 난 `ProxyError`(응답 유실, 5xx)는 쓰기가 됐는지 알 수 없으니 재시도 전에
+목록을 확인한다.
 
 목록 방식: `list_dir`는 어디서나 동작한다. `list_entries`는 MLSD(RFC 3659)가
 필요하며 구형 데몬에서는 `error_perm`을 던진다 — 그럴 땐 `list_details`로
@@ -193,6 +210,49 @@ print(report.ok, report.ng, report.grouped())   # {host: [remote_path, ...]}
 호스트마다 다른 파일을 올리려면 `UploadSpec`을 직접 만든다. `upload_fleet`은 한 번
 호출로 끝나는 함수 래퍼다.
 
+**디렉터리 생성(`mkdir`):** STOR는 없는 폴더에 쓰지 못하므로, 새 경로에 올리기 전에
+`mkdir`로 목적지를 보장한다. `MkdirSpec.dirs`의 각 경로는 `mkdir -p`처럼 동작한다 —
+없는 상위 폴더까지 만들고, 이미 있는 폴더는 성공으로 친다. 그래서 매 업로드 전에
+불러도 안전하다:
+
+```python
+from ftp_handler.direct_downloader import FtpFleetDownloader, MkdirSpec
+
+dl = FtpFleetDownloader(user="u", password="p")
+report = dl.mkdir([MkdirSpec(h, dirs=["/INBOX/2026/10"]) for h in hosts])
+ready = set(report.grouped())                 # {host: [remote_dir, ...]} — 성공한 호스트
+specs = [s for s in specs if s.host in ready]  # 폴더가 보장된 호스트에만 업로드
+```
+
+FTP는 "이미 있음"과 "권한 없음"에 똑같이 550을 답하므로, MKD가 거절되면 그 경로로
+`CWD`를 시도해 구분한다(들어가지면 이미 있는 폴더). 상대 경로는 로그인 직후의 PWD
+기준이다. `mkdir_fleet(specs, user=..., password=...)`은 한 번 호출 래퍼다.
+
+**삭제(`delete`):** `DeleteSpec.files`는 `DELE`로, `dirs`는 `RMD`로 지운다. 한 spec 안에서
+파일을 먼저 지우므로, 그 spec이 비우는 폴더는 같이 지울 수 있다. `RMD`는 **빈 폴더만**
+지운다 — 재귀 삭제는 없으니 하위 폴더가 있으면 깊은 것부터 나열한다. 이미 없는 경로는
+성공으로 치므로 같은 요청을 다시 보내도 결과가 같다:
+
+```python
+from ftp_handler.direct_downloader import DeleteSpec, FtpFleetDownloader
+
+dl = FtpFleetDownloader(user="u", password="p")
+report = dl.delete([
+    DeleteSpec(h, files=["/INBOX/2026/10/r.csv"], dirs=["/INBOX/2026/10"]) for h in hosts
+])
+print(report.grouped())                       # {host: [지워진 경로, ...]} — 파일 다음 폴더
+for f in report.failures:                     # 비지 않은 폴더, 권한 거절 등
+    print(f.host, f.remote_path, f.error)
+```
+
+거절(550)이 "없음"인지 "권한 없음"인지는 그 경로를 다시 확인해 가른다 — `SIZE`가
+답하면 파일이 남아 있고, `CWD`로 들어가지면 폴더가 남아 있으니 실패다. 둘 다 아니면
+이미 없는 것이라 성공이다. 그래서 파일 자리에 폴더를 주거나(그 반대도) 비지 않은 폴더를
+주면 실패로 남는다. 확인 명령이 550이 아닌 이유로 거절되면(예: `SIZE` 미지원 502) 판단할
+근거가 없으므로 역시 실패로 남는다. `host_timeout`으로 포기된 호스트는 그 뒤로 삭제
+명령을 더 보내지 않는다. 한계: 파일이 있는데 그 파일의 `SIZE`까지 550으로 거절하는
+서버라면 "없음"으로 읽힌다. `delete_fleet(specs, user=..., password=...)`은 한 번 호출 래퍼다.
+
 ---
 
 ## 케이스 3 — HTTP 프록시 경유의 방화벽 안 클라이언트 (`proxy`)
@@ -222,7 +282,7 @@ app.register_blueprint(ftp_proxy_sknn_v3)
 ```
 
 플릿 하나가 계정 하나인 것은 아니다. 계열이 섞여 계정이 갈리는 경우에는 그 호스트의
-spec 에만 계정을 실으면 되고, 나머지는 위 환경 변수를 그대로 쓴다:
+spec 에만 계정을 실으면 되고, 나머지는 클라이언트 생성자의 공용 계정을 쓴다:
 
 ```python
 specs = [
@@ -244,17 +304,18 @@ dl = FtpFleetDownloader(user="u", password="p")   # 프록시 위치는 PROXY_UR
 report = dl.download(specs, on_file=save_to_dir(r"C:\eqp"))  # on_file은 로컬에서 실행
 ```
 
-proxy adapter의 `user` / `password` 인자는 direct adapter와 같은 생성자
-시그니처를 유지하기 위해 받지만 HTTP body에는 넣지 않는다. 실제 FTP 로그인에는
-프록시 호스트 환경 변수의 계정을 사용한다.
+계정은 `user`와 `password` **각각 따로** spec 값 → 클라이언트 생성자 값 → 프록시
+호스트 환경 변수 순으로 정해진다. 그래서 한쪽만 비면 그 필드만 환경 변수에서 채워진다
+(예: spec이 `password`만 주면 `FTP_PROXY_FTP_USER`와 짝지어진다). 프록시 환경 계정을
+쓰려면 spec과 생성자 양쪽에서 그 필드를 빈 문자열로 둔다.
 
 데이터클래스(`HostSpec`, `DownloadReport`, …)는 direct 다운로더의 것과 동일한
 객체라서 `report.grouped()`, `to_specs()` 등이 똑같이 동작한다. copy-out: 이 쌍에
 `fleet_downloader.py`와 `listing.py`를 더하면 클라이언트 PC에 평평하게 떨궈 bare
 이름으로 import 할 수 있다.
 
-`download` / `list_dirs` / `size_dirs`와 마찬가지로 `upload`도 같은 표면으로 프록시
-너머에서 동작한다(케이스 2의 예제에서 import만 `ftp_handler.proxy`로 바꾸면 된다).
+`download` / `list_dirs` / `size_dirs`와 마찬가지로 `upload`, `mkdir`, `delete`도 같은 표면으로
+프록시 너머에서 동작한다(케이스 2의 예제에서 import만 `ftp_handler.proxy`로 바꾸면 된다).
 클라이언트가 바이트를 base64로 실어 보내면 프록시가 풀어서 STOR 한다. `size_dirs`는
 `list_dirs`처럼 바이트를 싣지 않으므로 가볍다.
 
