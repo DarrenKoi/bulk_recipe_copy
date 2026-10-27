@@ -7,6 +7,27 @@ MI 엔지니어 전용 web app. Hitachi CD-SEM 한 대의 레시피(여러 개)�
 보여줍니다. 사용자는 경로를 정하지 못합니다. SKEWNONO(`skewnono_v3_nuxt`)와
 **별개로 운영**하며, SKEWNONO에는 외부 링크 하나만 둡니다.
 
+repo 이름은 `bulk_recipe_copy`이지만 **recipe tuning도 이 repo에서 진행합니다**
+(user-confirmed 2026-10-27). 아래 "고정된 구조"는 레시피 횡전개를 위해 정한 것이며,
+tuning 기능이 그 가정에 미치는 영향은 "작업 분담" 아래에 적습니다.
+
+## 작업 분담 (user-confirmed 2026-10-27)
+
+| 담당 | 맡는 일 |
+| --- | --- |
+| office agent | backend·frontend. 그리고 **mock 데이터를 만들어** 집에서도 같은 작업을 이어 갈 수 있게 합니다 |
+| home agent | 사무실에서 쓸 **DB 구축** |
+
+- mock 데이터는 집 개발의 유일한 근거입니다. office agent가 만드는 mock도 아래 "사무실
+  사실은 두 곳에" 규칙을 따르고, 확인한 사실과 가정을 출처 표시로 구분합니다.
+- 두 agent가 같은 working tree를 쓸 수 있으므로 커밋은 직접 고친 파일만 명시 경로로
+  합니다(아래 Git).
+- tuning 요청은 전송과 **같은 프로세스**(`processes=1`, `harakiri` 없음)에서 돕니다.
+  무거운 조회·계산에는 앱 안 상한(deadline, 행 수·바이트 상한)을 둡니다. 그 요청의
+  OOM은 진행 중인 전송까지 끊기 때문입니다(복구는 재기동 대조가 하지만). 상한으로
+  묶이지 않는 작업이 생기면 전송과 프로세스를 나누는 것을 그때 검토합니다
+  (`docs/design/ops-261027.md` 2절).
+
 설계 결정의 전문은 `docs/design/handoff.md`(r3, 2026-10-18 grilling 으로 확정)입니다.
 거기 "확정한 결정"은 다시 미정으로 취급하지 않고, "r2에서 폐기된 것" 표의 항목은
 다시 제안하지 않습니다. 다음 단계는 `to-spec`으로 스펙을 쓰는 것이고, 코드는 스펙
