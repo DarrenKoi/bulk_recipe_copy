@@ -102,7 +102,7 @@ MI 엔지니어는 매일 20~30개의 Hitachi CD-SEM 레시피를 새로 만들�
 ### 앱 모양 (확정)
 
 - Flask가 빌드된 Nuxt 4 SPA(`ssr: false`)를 서빙합니다. SKEWNONO의 SPA 서빙, `LASTUSER` 인증, `.env`·office Redis 연결, vendored `ftp_handler`를 **복사**합니다.
-- uWSGI `processes=1`, `threads=4`, `enable-threads`, `lazy-apps`. `touch-reload`·`max-requests`는 두지 않습니다.
+- uWSGI `processes=1`, `threads=4`, `enable-threads`, `lazy-apps`. `touch-reload`는 수동 재기동 전용(야간 자동 재기동 없음, user-confirmed 2026-10-27). `max-requests`·`reload-on-rss`·`harakiri`는 두지 않습니다.
 - 앱 팩토리가 부팅 때 **스케줄러 스레드 하나**를 띄웁니다. 장비 작업자 스레드는 스케줄러가 job마다 만듭니다.
 - 앱 팩토리는 세 가지를 주입받습니다: 장비 명부 공급자, `connect(장비) → FTP 클라이언트`, 저장 위치(SQLite 파일·스냅샷 폴더). 운영은 office Redis와 `FtpClient`, 테스트와 집 개발은 가짜 장비를 넣습니다. **(스펙 결정)**
 - FTP 계정·인코딩·각종 상한은 `.env`에서 읽습니다. `.env`는 커밋하지 않습니다.

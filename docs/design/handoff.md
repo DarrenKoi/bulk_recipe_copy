@@ -29,8 +29,9 @@ web app 하나로 다시 정했습니다. 코드는 아직 없습니다. 폴더 
 - **독립 web app 하나**(`bulk_recipe_copy`)에 검색·선택·확인·전송·결과 화면이 전부
   있습니다. 사내 클라우드 web app 슬롯 하나를 새로 받습니다.
 - uWSGI는 `processes=1`, `threads=4`(화면 요청용), `enable-threads`, `lazy-apps`.
-  **`touch-reload`와 `max-requests`는 두지 않습니다.** harakiri는 요청 단위라 전송
-  스레드와 무관합니다. 전송 소비 스레드는 앱 부팅 때 하나 띄웁니다.
+  **`max-requests`는 두지 않습니다.** `touch-reload`는 사람이 재기동할 때만 씁니다
+  (user-confirmed 2026-10-27, 야간 자동 재기동 없음). 끊긴 전송은 재기동 대조가
+  거둡니다. harakiri는 SIGKILL이 프로세스 하나의 모든 전송을 함께 끊으므로 두지 않습니다. 전송 소비 스레드는 앱 부팅 때 하나 띄웁니다.
 - 프로세스가 하나이므로 **상태 공유용 Redis가 필요 없습니다.** job·file 상태는
   로컬 **SQLite**(SKEWNONO `chat/store.py` 선례), 원본 스냅샷은 **로컬 임시
   폴더**(클라우드 스토리지 100 GB 여유)입니다. office Redis는 `sem_list`(장비

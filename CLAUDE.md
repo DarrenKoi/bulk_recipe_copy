@@ -17,8 +17,9 @@ MI 엔지니어 전용 web app. Hitachi CD-SEM 한 대의 레시피(여러 개)�
 - Flask + Nuxt 4 SPA(`ssr: false`), Flask가 빌드 결과를 서빙. **FastAPI 아님** — 안정성은
   아래 네 가지에서 나오고 프레임워크와 무관하며, `ftp_handler`가 동기 `ftplib`이라
   async는 쓸 곳이 없습니다.
-- uWSGI `processes=1`, `threads=4`, `enable-threads`, `lazy-apps`. **`touch-reload`와
-  `max-requests`는 두지 않습니다.** 전송 소비 스레드는 부팅 때 하나.
+- uWSGI `processes=1`, `threads=4`, `enable-threads`, `lazy-apps`. `touch-reload`는
+  **사람이 재기동할 때만** 씁니다(야간 자동 재기동 없음). `max-requests`·`reload-on-rss`·
+  `harakiri`는 두지 않습니다. 전송 소비 스레드는 부팅 때 하나.
 - 상태는 로컬 **SQLite**, 원본 스냅샷은 **로컬 임시 폴더**. 공유 Redis 큐 없음.
   office Redis는 `sem_list`(장비 IP·fab·모델) **읽기 전용**.
 - 쓰기는 `FtpClient.put`(temp 업로드 → rename)만. 덮어쓰기는 사용자 확인 뒤
