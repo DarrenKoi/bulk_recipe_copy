@@ -200,6 +200,8 @@ CPU가 아니라 **프로세스 수명**입니다. SKEWNONO worker 1의 스레�
 - `docs/design/review-r1.md`: Claude(`claude-r1.md`)와 Codex(`codex-r1.md`)의 r1 검토 종합.
   r1·r2의 구조 결정은 r3에서 대부분 폐기되었으나, 상태 모델·검증·복구 규칙은 거기서
   왔습니다.
+- `docs/design/ops-261027.md`: uWSGI 수동 재기동, 재활용 옵션 없는 메모리 관리,
+  화면을 이 앱에 두는 이유의 재확인(2026-10-27).
 
 ## 추천 스킬
 
