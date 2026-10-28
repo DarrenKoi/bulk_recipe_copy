@@ -22,6 +22,6 @@
 
 다른 저장소의 일(이 티켓들로 끝나지 않음):
 
-- `put` 덮어쓰기 모드와 `mkdir`을 upstream `flask_modules`와 SKEWNONO의 vendored 사본에도
-  넣고 검증합니다. 02가 끝난 뒤의 후속 작업입니다.
+- ~~`put` 덮어쓰기 모드와 `mkdir`을 upstream `flask_modules`와 SKEWNONO의 vendored 사본에도
+  넣고 검증합니다.~~ 2026-10-29 완료(`flask_modules` `1ea1b6f`, `ftp_handler/VENDORED.md`).
 - SKEWNONO 상단 메뉴에 "레시피 복사" 외부 링크를 넣습니다.

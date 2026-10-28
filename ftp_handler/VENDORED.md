@@ -1,31 +1,27 @@
 # ftp_handler — vendored copy
 
 `skewnono_v3_nuxt`의 `ftp_handler/`를 2026-10-18에 복사한 것입니다. 원본 upstream은
-`flask_modules`입니다. 2026-10-28에 `flask_modules` `2a9a29d`(proxy 단일 서버
-`FtpClient` 쓰기 지원과 그 리뷰 수정)로 다시 맞췄습니다.
-
-이 앱이 고치는 것은 `core/client.py`의 두 가지입니다. `put`의 덮어쓰기 모드(temp →
-`DELE` → `RNTO`)와 `mkdir`. 고치면 SKEWNONO 사본과 upstream `flask_modules`에도 같은
-변경을 넣습니다. 그 외의 파일은 upstream과 바이트 단위로 같게 유지합니다.
+`flask_modules`입니다. 2026-10-29에 `flask_modules` `1ea1b6f`로 다시 맞췄고, 이 파일을
+빼면 upstream과 바이트 단위로 같습니다. 고칠 일이 생기면 upstream에서 고치고 이 사본과
+SKEWNONO 사본에 그대로 복사합니다.
 
 `web_app/BackgroundJobs`와 `proxy/`는 이 앱에서 쓰지 않습니다(메모리 기반, 덮어쓰는
 STOR). 지우지 않고 두는 것은 upstream과의 diff를 읽기 쉽게 하기 위해서입니다.
 
-## upstream과 다른 점(`core/client.py`)
+## 이 앱에서 올라간 변경
 
-2026-10-28 재동기화는 처음 복사한 시점의 원본(SKEWNONO `96b50498`)을 공통 조상으로
-3-way merge 했습니다. 이 앱의 변경 두 가지는 유지하고 나머지는 upstream을 받았습니다.
+이 앱이 로컬로 고쳐 쓰던 `core/client.py`의 두 가지는 2026-10-29에 upstream에 들어갔습니다
+(`8dc1009`, Codex 리뷰 수정 `52efc28`·`1ea1b6f`).
 
-- `put(..., overwrite=False)`: 티켓 02. upstream에는 없습니다.
-- `mkdir(remote_dir, *, floor=None)`: 티켓 02·06. 상위 폴더까지 한 단계씩 MKD 하고
-  (`mkdir -p`), `floor` 위는 만들지 않습니다. 이미 있음을 알리는 거절 코드가 서버마다
-  달라(550, 521) 모든 `error_perm`을 CWD로 확인합니다. upstream의 `mkdir`은 MKD 한
-  번에 550만 확인하는 다른 동작이라, 이름이 같아도 이 앱 버전을 남겼습니다.
-- `_is_dir`는 upstream 것을 씁니다. 빈 PWD 응답이면 확인하지 않고, 거절이 아닌 이유로
-  CWD가 실패하면 연결을 버립니다. 이전 로컬 버전보다 안전합니다.
-- `rmdir`은 upstream에서 그대로 받았습니다.
-
-그래서 이 사본의 `proxy.FtpClient`는 `put`/`mkdir` 시그니처가 `core.FtpClient`와
-다릅니다(`overwrite`, `floor` 없음). 이 앱은 proxy를 쓰지 않으므로 문제가 없지만,
-proxy로 바꾸려면 두 변경을 upstream에 먼저 넣어야 합니다. 두 원본에 반영하는 일은
-여전히 후속 작업입니다.
+- `put(..., overwrite=False)`: 티켓 02. `overwrite=True`는 temp STOR → 기존 대상 `DELE` →
+  `RNTO`입니다. upstream으로 올리면서 데이터 유실 경로 두 개를 고쳤습니다. `DELE`가 끝난
+  뒤 rename이 거절되거나, `DELE` 응답이 유실·디코딩 실패하면 이제 임시 파일을 지우지 않고
+  `temp_path`로 알립니다(후자는 `TransferUncertain`). 이전 로컬 버전은 두 경우 모두 기존
+  파일과 새 파일을 함께 잃을 수 있었습니다.
+- `mkdir(remote_dir, *, floor=None)`: 티켓 02·06. upstream `mkdir`도 이제 `mkdir -p`이며,
+  모든 `error_perm`을 CWD로 확인합니다. 달라진 점은 `floor` 검사입니다. `floor`는
+  `remote_dir` 자신이거나 실제 상위 폴더여야 하고(같은 절대/상대 기준, 구성 요소 단위 일치,
+  `..` 금지, `.`는 무시), 아니면 MKD 전에 `ValueError`입니다. `remote_dir`가 `floor`
+  자신이면 아무것도 만들지 않고 CWD로 폴더인지 확인합니다(아니면 550 `error_perm`).
+  `backend/layout.py`의 경로는 모두 절대 경로이고 `_part`로 `..`를 거르므로 이 앱의 호출은
+  항상 이 검사를 통과합니다.

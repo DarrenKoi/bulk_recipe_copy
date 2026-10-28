@@ -54,7 +54,7 @@ tuning 기능이 그 가정에 미치는 영향은 "작업 분담" 아래에 적
 
 | 경로 | 용도 |
 | --- | --- |
-| ~~`ftp_handler/`~~ **복사 완료** (2026-10-18, `ftp_handler/VENDORED.md`) | FTP 클라이언트. `put` 덮어쓰기 모드와 `mkdir` 추가 필요 |
+| ~~`ftp_handler/`~~ **복사 완료** (2026-10-18, `ftp_handler/VENDORED.md`) | FTP 클라이언트. `put` 덮어쓰기 모드와 `mkdir(floor=)`는 2026-10-29 upstream 반영 완료 — 이제 upstream과 같게 유지 |
 | `backend/_spa/` | 빌드된 Nuxt 서빙 |
 | `backend/_auth/` | `LASTUSER` 쿠키 신원 |
 | `backend/_runtime/office_redis.py` | `.env` 로딩과 office Redis 연결 |

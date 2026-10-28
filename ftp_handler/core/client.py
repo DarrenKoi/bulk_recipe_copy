@@ -5,7 +5,7 @@ fanning out across hundreds of hosts concurrently. This is its small sibling:
 one host, one blocking connection, the operations you reach for from a
 notebook or an ad-hoc script — list a directory, download a file, upload a
 file, remove a file, make or remove a directory — plus ``put``, a no-clobber
-write via temp file + rename.
+(or, with ``overwrite=True``, replacing) write via temp file + rename.
 
 Use it as a context manager so the connection is opened once and always closed::
 
@@ -16,7 +16,7 @@ Use it as a context manager so the connection is opened once and always closed::
         data = ftp.download(names[0])                     # fetch one
         ftp.upload("/INBOX/report.csv", csv_bytes)        # push one
         ftp.remove("/MEAS/stale.dat")                     # delete one
-        ftp.mkdir("/INBOX/2026")                          # existing dir is fine
+        ftp.mkdir("/INBOX/2026/10")                       # mkdir -p; existing is fine
         ftp.rmdir("/INBOX/old")                           # empty dirs only
 
 Errors from the server (``ftplib.error_perm`` for a missing path, socket
@@ -30,7 +30,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
-from ftplib import FTP, error_perm
+from ftplib import FTP, error_perm, error_temp
 from io import BytesIO
 
 # Shared NLST normalization lives in core.listing so single-server and fan-out
@@ -61,12 +61,44 @@ class ListingTooLarge(Exception):
     """A LIST reply outgrew its line or byte cap; nothing was returned."""
 
 
+def _mkdir_levels(remote_dir: str, floor: str | None) -> tuple[list[str], int]:
+    """The paths ``mkdir`` walks, shallowest first, and how many ``floor`` covers.
+
+    ``floor`` must be ``remote_dir`` itself or a real ancestor: same absolute or
+    relative base, equal component by component, no ``..`` in either. Anything
+    else raises ``ValueError`` before a single MKD -- compared by depth alone,
+    ``..`` could climb above the floor and an unrelated floor would skip levels.
+    ``.`` components are dropped from both: ``/CLS/data/.`` is the floor itself.
+    """
+    root = "/" if remote_dir.startswith("/") else ""
+    parts = [p for p in remote_dir.split("/") if p not in ("", ".")]
+    levels = [root + "/".join(parts[: i + 1]) for i in range(len(parts))]
+    if floor is None:
+        return levels, 0
+    floor_parts = [p for p in floor.split("/") if p not in ("", ".")]
+    if (
+        floor.startswith("/") != bool(root)
+        or ".." in parts
+        or ".." in floor_parts
+        or parts[: len(floor_parts)] != floor_parts
+    ):
+        raise ValueError(f"floor {floor!r} is not {remote_dir!r} or an ancestor of it")
+    return levels, len(floor_parts)
+
+
+def _name_temp(exc: Exception, temp: str) -> None:
+    """Mark ``exc`` with the temp file ``put`` left on the server."""
+    exc.temp_path = temp
+    exc.add_note(f"temp file left on server: {temp}")
+
+
 class TargetExists(Exception):
     """``put`` found something already at the target path and wrote nothing there."""
 
 
 class TransferUncertain(Exception):
-    """The connection dropped after ``put`` sent its rename, before the reply.
+    """The connection dropped after ``put`` sent its rename (or, with
+    ``overwrite=True``, the DELE of the old target), before the reply.
 
     The server may or may not have renamed: the file is at the target or still
     at ``temp_path``. List the folder before retrying.
@@ -431,12 +463,13 @@ class FtpClient:
         leftover. A connection error during the rename raises
         ``TransferUncertain``: the server may already have renamed.
 
-        ``overwrite=True`` replaces an existing target instead: the temp file
-        is STORed as above, then the target is DELEd (if present) and the temp
-        renamed onto it. DELE comes first because RNTO onto an existing file
-        is refused by some servers. The target is briefly absent between DELE
-        and RNTO; a reply lost in that window also raises ``TransferUncertain``
-        with the complete data still at ``temp_path``.
+        ``overwrite=True`` replaces an existing target instead: the temp is
+        STORed as above, then the target is DELEd (if present) and the temp
+        renamed onto it. DELE comes first because some servers refuse RNTO
+        onto an existing file, so the target is briefly absent in between.
+        Once that DELE has run the temp is the only copy: a failed rename keeps
+        it and names it on the exception (``temp_path``) rather than deleting
+        it, and a reply lost there is ``TransferUncertain`` as usual.
         """
         if not overwrite and self._exists(remote_path):
             raise TargetExists(remote_path)
@@ -456,10 +489,24 @@ class FtpClient:
                 self._discard()  # mid-transfer: the control channel is out of step
             self._drop_temp(temp, exc)
             raise
+        deleted = False
         try:
             if overwrite and self._exists(remote_path):
-                self._ftp.delete(remote_path)
+                try:
+                    self._ftp.delete(remote_path)
+                except (error_perm, error_temp):
+                    raise  # a clean refusal: the old target is still there
+                except Exception as exc:
+                    # The DELE may have run with only its reply lost or
+                    # unreadable: the temp may be the only copy left.
+                    self._discard()
+                    raise TransferUncertain(
+                        f"DELE {remote_path}: outcome unknown", temp_path=temp
+                    ) from exc
+                deleted = True
             self._ftp.rename(temp, remote_path)
+        except TransferUncertain:
+            raise
         except (OSError, EOFError) as exc:
             # The command may have reached the server and run; only the reply
             # is missing, so neither "renamed" nor "not renamed" is knowable.
@@ -468,7 +515,10 @@ class FtpClient:
                 f"rename {temp} -> {remote_path}: reply lost", temp_path=temp
             ) from exc
         except Exception as exc:
-            self._drop_temp(temp, exc)
+            if deleted:
+                _name_temp(exc, temp)  # the old target is gone: keep the new copy
+            else:
+                self._drop_temp(temp, exc)
             raise
 
     def _drop_temp(self, temp: str, exc: Exception) -> None:
@@ -478,8 +528,7 @@ class FtpClient:
                 raise ConnectionError("connection discarded")
             self._ftp.delete(temp)
         except Exception:
-            exc.temp_path = temp
-            exc.add_note(f"temp file left on server: {temp}")
+            _name_temp(exc, temp)
 
     def _exists(self, remote_path: str) -> bool:
         # SIZE: one control-channel round trip, no data connection. TYPE I
@@ -495,32 +544,39 @@ class FtpClient:
             raise
         return True
 
+    def remove(self, remote_path: str) -> None:
+        """Delete ``remote_path`` (DELE)."""
+        self._ftp.delete(remote_path)
+
     def mkdir(self, remote_dir: str, *, floor: str | None = None) -> None:
-        """Create ``remote_dir`` and any missing parents (MKD, one level each).
+        """Create ``remote_dir`` and any missing parents (``mkdir -p``).
 
-        A level that already exists counts as success. MKD's refusal code for
-        "exists" varies by server (550, 521), so any ``error_perm`` is checked
-        by CWD into that level; if it is not an enterable directory, the
-        original refusal propagates.
+        One MKD per level, as the fleet ``mkdir`` does; a level that already
+        exists is success. FTP's "exists" refusal is 550 on most servers — the
+        same code as "permission denied" — and 521 on some, so any
+        ``error_perm`` is settled by CWD into that level: a directory there is
+        success, anything else re-raises the refusal.
 
-        With ``floor`` (an ancestor of ``remote_dir``), only levels below it
-        are created: ``floor`` and its parents are never MKD'd, so a missing
-        ``floor`` makes the first MKD below it fail instead of recreating it.
+        ``floor`` (an ancestor of ``remote_dir``) is never created, nor is
+        anything above it: only the levels below it are MKD'd, so a missing
+        ``floor`` makes the first MKD below it fail instead of bringing it
+        back. Use it for a folder the caller is not allowed to recreate. It
+        must be ``remote_dir`` or a real ancestor of it (``ValueError``
+        otherwise, before any MKD); when it is ``remote_dir`` itself, nothing
+        is created and a CWD checks it is a directory (550 ``error_perm`` if not).
         """
-        parts = [p for p in remote_dir.split("/") if p]
-        prefix = "/" if remote_dir.startswith("/") else ""
-        start = len([p for p in floor.split("/") if p]) if floor else 0
-        for i in range(start, len(parts)):
-            level = prefix + "/".join(parts[: i + 1])
+        levels, start = _mkdir_levels(remote_dir, floor)
+        if start == len(levels):
+            target = levels[-1] if levels else remote_dir
+            if not self._is_dir(target):
+                raise error_perm(f"550 {target}: not a directory (floor, not created)")
+            return
+        for level in levels[start:]:
             try:
                 self._ftp.mkd(level)
             except error_perm:
                 if not self._is_dir(level):
                     raise
-
-    def remove(self, remote_path: str) -> None:
-        """Delete ``remote_path`` (DELE)."""
-        self._ftp.delete(remote_path)
 
     def rmdir(self, remote_dir: str) -> None:
         """Remove the empty directory ``remote_dir`` (RMD)."""
