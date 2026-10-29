@@ -11,7 +11,16 @@ export default defineNuxtConfig({
   app: {
     head: {
       title: '레시피 횡전개',
-      htmlAttrs: { lang: 'ko' }
+      htmlAttrs: { lang: 'ko' },
+      // SKEWNONO inlines the SVG as a data: URI because its URL changes per
+      // click; this app has no routing, so a plain file link is enough.
+      link: [
+        { rel: 'icon', type: 'image/svg+xml', href: '/favicon/favicon.svg' },
+        { rel: 'icon', href: '/favicon/favicon.ico', sizes: 'any' },
+        { rel: 'apple-touch-icon', sizes: '180x180', href: '/favicon/apple-touch-icon.png' },
+        { rel: 'manifest', href: '/favicon/site.webmanifest' }
+      ],
+      meta: [{ name: 'theme-color', content: '#f0eee9' }]
     }
   },
 
